@@ -254,6 +254,26 @@ async function main() {
     assert.equal(seenBranchId, "own-branch");
   });
 
+  await test("branchScoped=true refuses a non-owner with no branch (never every branch)", async () => {
+    let ran = false;
+    const def = fakeDefinition({
+      branchScoped: true,
+      run: async () => {
+        ran = true;
+        return { rows: [], totals: {} };
+      },
+    });
+    registerReport(def);
+    await assert.rejects(
+      () => executeReport(def.id, ctxFor(session({ role: "manager", branchId: null })), baseFilters()),
+      ReportAccessDeniedError,
+    );
+    assert.equal(ran, false);
+    // The owner without a branch still sees every branch.
+    await executeReport(def.id, ctxFor(session({ role: "owner", branchId: null })), baseFilters());
+    assert.equal(ran, true);
+  });
+
   await test("branchScoped=false passes the requested branchId through untouched", async () => {
     let seenBranchId: string | null | undefined;
     const def = fakeDefinition({

@@ -9,6 +9,7 @@ import {
   resolveDiscountApproval,
 } from "@/lib/sales/discountApproval";
 import { SaleError } from "@/lib/sales/errors";
+import { checkPriceFloor, needsAdminForFloor, priceFloorMessage } from "@/lib/sales/priceFloor";
 import { validateSaleLines } from "@/lib/sales/validateSale";
 
 /**
@@ -35,14 +36,26 @@ export async function POST(req: Request) {
       validated.subtotal,
     );
     const actor = { userId: access.userId, name: access.name, role: access.role };
-    if (breakdown.discountTotal <= 0 || !exceedsDiscountLimit(breakdown, actor.role)) {
+    // POS-062/063: below the minimum price → only the Admin can approve.
+    const floorViolations = await checkPriceFloor(validated, breakdown);
+    const priceFloor = needsAdminForFloor(floorViolations, actor.role)
+      ? { message: priceFloorMessage(floorViolations) }
+      : null;
+    const discountNeedsApproval =
+      breakdown.discountTotal > 0 && exceedsDiscountLimit(breakdown, actor.role);
+    if (!discountNeedsApproval && !priceFloor) {
       return NextResponse.json({ required: false });
     }
 
-    const approver = await resolveDiscountApproval(breakdown, actor, {
-      email: typeof body.email === "string" ? body.email : undefined,
-      password: typeof body.password === "string" ? body.password : undefined,
-    });
+    const approver = await resolveDiscountApproval(
+      breakdown,
+      actor,
+      {
+        email: typeof body.email === "string" ? body.email : undefined,
+        password: typeof body.password === "string" ? body.password : undefined,
+      },
+      priceFloor,
+    );
     // resolveDiscountApproval returns null only when no approval is needed.
     if (!approver) return NextResponse.json({ required: false });
 
@@ -57,7 +70,9 @@ export async function POST(req: Request) {
       session: access,
       action: "discount_approved",
       entityType: "Sale",
-      detail: `${breakdown.maxDiscountPct}% (−${breakdown.discountTotal}) approved by ${approver.name} (${approver.role})`,
+      detail: `${breakdown.maxDiscountPct}% (−${breakdown.discountTotal})${
+        priceFloor ? ` below minimum price (${priceFloor.message})` : ""
+      } approved by ${approver.name} (${approver.role})`,
       req,
     });
 
@@ -68,11 +83,14 @@ export async function POST(req: Request) {
       approver: { name: approver.name, role: approver.role },
       maxDiscountPct: breakdown.maxDiscountPct,
       discountTotal: breakdown.discountTotal,
+      belowMinimumPrice: priceFloor !== null,
     });
   } catch (error) {
     const denied =
       error instanceof SaleError &&
-      (error.code === "DISCOUNT_APPROVAL_REQUIRED" || error.code === "DISCOUNT_NOT_AUTHORIZED");
+      (error.code === "DISCOUNT_APPROVAL_REQUIRED" ||
+        error.code === "DISCOUNT_NOT_AUTHORIZED" ||
+        error.code === "PRICE_FLOOR_APPROVAL_REQUIRED");
     const clientError = error instanceof SaleError || error instanceof SyntaxError;
     return NextResponse.json(
       {

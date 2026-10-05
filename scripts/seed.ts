@@ -752,7 +752,7 @@ async function seed() {
     toVersion,
   });
 
-  await Formula.insertMany([
+  const seededFormulas = await Formula.insertMany([
     {
       name: "Remix Standard 100ml",
       type: "remix",
@@ -1062,6 +1062,48 @@ async function seed() {
       expiry: new Date("2026-08-05"),
       lines: [qline(bySku["RM-STD"], 4, 195, "remix")],
     },
+    // POS-107: the customer declined through the approval link.
+    {
+      number: "QT-2026-020",
+      customerName: "Noor Trading LLC",
+      customerPhone: "+971 4 330 8899",
+      status: "rejected",
+      customerDecision: "rejected",
+      customerDecisionAt: new Date("2026-07-29"),
+      customerDecisionNote: "Price too high for this quantity",
+      date: new Date("2026-07-27"),
+      expiry: new Date("2026-08-10"),
+      lines: [qline(bySku["SG-001"], 12, 330, "wholesale")],
+    },
+    // POS-110: approved custom blend on the customer's own formula (concrete
+    // oils, so converting it consumes the full BOM). Priced above the Remix
+    // product's 45% minimum margin on that BOM.
+    {
+      number: "QT-2026-021",
+      customerId: c1._id,
+      customerName: c1.name,
+      customerPhone: c1.phone,
+      status: "approved",
+      customerDecision: "approved",
+      customerDecisionAt: new Date("2026-07-30"),
+      signedByName: c1.name,
+      date: new Date("2026-07-28"),
+      expiry: new Date("2026-08-11"),
+      lines: [
+        {
+          name: "Custom blend — Fatima Amber Oud (100ml)",
+          qty: 2,
+          unitLabel: "bottle",
+          unitPrice: 260,
+          lineType: "custom_blend" as const,
+          formulaId: seededFormulas.find((f) => f.name === "Fatima — Amber Oud Remix")?._id,
+          formulaName: "Fatima — Amber Oud Remix",
+          bottleNote: "Gold cap, velvet pouch",
+          designNote: "Initials on label",
+          charges: 10,
+        },
+      ],
+    },
   ];
 
   await Quotation.insertMany(
@@ -1258,7 +1300,8 @@ async function seed() {
     currentUserName: "Ahmad Ibrahim",
     currentUserRole: "manager",
     currentUserRoleLabel: "Manager",
-    salespeople: ["Ahmad Ibrahim"],
+    // POS-093: every sale needs a salesperson from this list.
+    salespeople: ["Ahmad Ibrahim", "Sara Al Balushi", "Khalid Al Harthy"],
     activeSalesperson: "Ahmad Ibrahim",
     pettyCashFloat: 500,
     integrations: [

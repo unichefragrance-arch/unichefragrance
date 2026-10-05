@@ -6,6 +6,7 @@ import {
 } from "@/lib/reports/period";
 import { buildSaleReport, type SaleReportStatus } from "@/lib/reports/salesReport";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { branchScopeFilter } from "@/lib/auth/guards";
 
 export const runtime = "nodejs";
 
@@ -25,6 +26,8 @@ export async function GET(req: Request) {
       period: parseReportPeriod(searchParams.get("period")),
       anchor: parseAnchorDate(searchParams.get("date")),
       limit: Number(searchParams.get("limit") || 500),
+      // Non-owners see only their own branch (plus legacy unbranched sales).
+      branchFilter: access ? branchScopeFilter(access) : null,
     });
     return NextResponse.json(report);
   } catch (error) {

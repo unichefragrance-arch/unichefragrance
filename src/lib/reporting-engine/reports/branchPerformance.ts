@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { Types } from "mongoose";
 import { canAccessAllBranches } from "@/lib/auth/roles";
 import { connectDB } from "@/lib/db";
@@ -61,22 +62,22 @@ registerReport({
           { $group: { _id: null, expenses: { $sum: "$amount" } } },
         ]);
 
-        const revenue = Math.round((salesAgg?.revenue || 0) * 100) / 100;
-        const expenses = Math.round((expenseAgg?.expenses || 0) * 100) / 100;
+        const revenue = roundMoney((salesAgg?.revenue || 0));
+        const expenses = roundMoney((expenseAgg?.expenses || 0));
 
         return {
           branch: branch.name,
           revenue,
           expenses,
-          profit: Math.round((revenue - expenses) * 100) / 100,
+          profit: roundMoney((revenue - expenses)),
         };
       }),
     );
 
     const totals = {
-      revenue: Math.round(rows.reduce((s, r) => s + Number(r.revenue || 0), 0) * 100) / 100,
-      expenses: Math.round(rows.reduce((s, r) => s + Number(r.expenses || 0), 0) * 100) / 100,
-      profit: Math.round(rows.reduce((s, r) => s + Number(r.profit || 0), 0) * 100) / 100,
+      revenue: roundMoney(rows.reduce((s, r) => s + Number(r.revenue || 0), 0)),
+      expenses: roundMoney(rows.reduce((s, r) => s + Number(r.expenses || 0), 0)),
+      profit: roundMoney(rows.reduce((s, r) => s + Number(r.profit || 0), 0)),
     };
 
     return { rows, totals };

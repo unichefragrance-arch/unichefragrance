@@ -128,7 +128,7 @@ async function resolveComponentProduct(
   productId: string,
   productName: string,
 ): Promise<ProductLean> {
-  let product = productsById.get(productId);
+  let product = productsById.get(String(productId));
   if (!product) {
     const loaded = await Product.findById(productId).lean<ProductLean>();
     if (!loaded) {
@@ -358,7 +358,7 @@ export async function validateRemixSale(
     throw new SaleError("OIL_NOT_SELECTED", "Oil not selected");
   }
 
-  let oilProduct = productsById.get(options.oilProductId);
+  let oilProduct = productsById.get(String(options.oilProductId));
   if (!oilProduct) {
     const loaded = await Product.findById(options.oilProductId).lean<ProductLean>();
     if (!loaded) {
@@ -422,7 +422,7 @@ function requireProduct(
   productId: string,
   label = productId,
 ): ProductLean {
-  const product = productsById.get(productId);
+  const product = productsById.get(String(productId));
   if (!product) {
     throw new SaleError("PRODUCT_NOT_FOUND", `Product not found: ${label}`);
   }
@@ -497,18 +497,20 @@ export async function validateSaleLines(
   const formulaIds = new Set<string>();
 
   for (const raw of rawLines) {
+    // Ids may arrive as ObjectIds (server callers, e.g. quotation conversion) —
+    // the lookup maps below are keyed by string, so normalise here.
     if (raw.productId && mongoose.isValidObjectId(raw.productId)) {
-      productIds.add(raw.productId);
+      productIds.add(String(raw.productId));
     }
     if (raw.oilProductId && mongoose.isValidObjectId(raw.oilProductId)) {
-      productIds.add(raw.oilProductId);
+      productIds.add(String(raw.oilProductId));
     }
     if (raw.formulaId && mongoose.isValidObjectId(raw.formulaId)) {
-      formulaIds.add(raw.formulaId);
+      formulaIds.add(String(raw.formulaId));
     }
     if (Array.isArray(raw.packagingProductIds)) {
       for (const id of raw.packagingProductIds) {
-        if (mongoose.isValidObjectId(id)) productIds.add(id);
+        if (mongoose.isValidObjectId(id)) productIds.add(String(id));
       }
     }
   }
@@ -747,7 +749,7 @@ export async function validateSaleLines(
         if (!mongoose.isValidObjectId(raw.formulaId)) {
           throw new SaleError("FORMULA_MISSING", "Invalid formula id");
         }
-        formulaForLine = formulasById.get(raw.formulaId) || null;
+        formulaForLine = formulasById.get(String(raw.formulaId)) || null;
         if (!formulaForLine) {
           throw new SaleError(
             "FORMULA_MISSING",

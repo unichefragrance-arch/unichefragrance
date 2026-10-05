@@ -4,6 +4,7 @@ import { Quotation } from "@/lib/models";
 import { computeQuotationTotals } from "@/lib/quotation/calc";
 import { normalizeQuotationLines } from "@/lib/quotation/lines";
 import { loadQuotationSettings } from "@/lib/quotation/server";
+import { trustedCustomerId } from "@/lib/sales";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { branchScopeFilter } from "@/lib/auth/guards";
@@ -89,7 +90,10 @@ export async function POST(req: Request) {
       : new Date(date.getTime() + validityDays * 24 * 60 * 60 * 1000);
 
     const baseDoc = {
-      customerId: body.customerId || undefined,
+      // POS-108: keep a picked customer only if it is the one with this phone.
+      customerId:
+        (await trustedCustomerId(body.customerId || undefined, String(body.customerPhone ?? ""))) ??
+        undefined,
       customerName: body.customerName,
       customerPhone: body.customerPhone,
       customerEmail: body.customerEmail || "",

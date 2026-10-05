@@ -9,6 +9,8 @@ export type SaleErrorCode =
   | "INVALID_DISCOUNT"
   | "DISCOUNT_APPROVAL_REQUIRED"
   | "DISCOUNT_NOT_AUTHORIZED"
+  | "PRICE_FLOOR_APPROVAL_REQUIRED"
+  | "HELD_BILL_UNAVAILABLE"
   | "VALIDATION";
 
 export class SaleError extends Error {

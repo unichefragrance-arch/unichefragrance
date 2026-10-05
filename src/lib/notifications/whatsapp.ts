@@ -1,3 +1,4 @@
+import { moneyText } from "@/lib/money";
 import { normalizePhone, storeWhatsAppNumber } from "./phone";
 
 export function buildWhatsAppUrl(toPhone: string, message: string): string {
@@ -65,7 +66,7 @@ export function formatQuotationSms(input: {
   const store = storeWhatsAppNumber();
   return [
     `UNICH Quotation ${input.number}:`,
-    `${input.items} item(s) · ${currency} ${input.total.toFixed(2)}`,
+    `${input.items} item(s) · ${moneyText(input.total, currency)}`,
     input.expiry ? `valid until ${input.expiry}` : "",
     input.approvalUrl ? `View: ${input.approvalUrl}` : "",
     store ? `Reply: +${store}` : "",

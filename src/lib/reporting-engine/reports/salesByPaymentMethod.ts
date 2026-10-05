@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Sale } from "@/lib/models";
@@ -42,12 +43,12 @@ registerReport({
     const rows: ReportRow[] = grouped.map((g) => ({
       payment: g._id || "Unknown",
       count: g.count,
-      revenue: Math.round(g.revenue * 100) / 100,
+      revenue: roundMoney(g.revenue),
     }));
 
     const totals = {
       count: rows.reduce((s, r) => s + Number(r.count || 0), 0),
-      revenue: Math.round(rows.reduce((s, r) => s + Number(r.revenue || 0), 0) * 100) / 100,
+      revenue: roundMoney(rows.reduce((s, r) => s + Number(r.revenue || 0), 0)),
     };
 
     return { rows, totals };

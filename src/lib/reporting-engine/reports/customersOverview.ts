@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { connectDB } from "@/lib/db";
 import { Customer } from "@/lib/models";
 import { registerReport } from "../registry";
@@ -33,16 +34,16 @@ registerReport({
     const rows: ReportRow[] = customers.map((c) => ({
       name: c.name,
       phone: c.phone,
-      totalPurchases: Math.round((c.totalPurchases || 0) * 100) / 100,
-      creditBalance: Math.round((c.creditBalance || 0) * 100) / 100,
+      totalPurchases: roundMoney((c.totalPurchases || 0)),
+      creditBalance: roundMoney((c.creditBalance || 0)),
       lastVisit: c.lastVisit ? new Date(c.lastVisit).toISOString().slice(0, 10) : null,
       customFormula: c.hasCustomFormula ? "Yes" : "No",
     }));
 
     const totals = {
       customers: rows.length,
-      totalPurchases: Math.round(rows.reduce((s, r) => s + Number(r.totalPurchases || 0), 0) * 100) / 100,
-      creditBalance: Math.round(rows.reduce((s, r) => s + Number(r.creditBalance || 0), 0) * 100) / 100,
+      totalPurchases: roundMoney(rows.reduce((s, r) => s + Number(r.totalPurchases || 0), 0)),
+      creditBalance: roundMoney(rows.reduce((s, r) => s + Number(r.creditBalance || 0), 0)),
     };
 
     return { rows, totals };

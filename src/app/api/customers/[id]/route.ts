@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
+import mongoose from "mongoose";
+import { customerProfileFields } from "@/lib/customers/profileFields";
 import { Customer } from "@/lib/models";
 import { toJSON } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
@@ -40,12 +42,16 @@ export async function PUT(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid customer id" }, { status: 400 });
+    }
     const body = await req.json();
-    if (body.lastVisit) body.lastVisit = new Date(body.lastVisit);
-    const customer = await Customer.findByIdAndUpdate(id, body, {
-      new: true,
-      runValidators: true,
-    });
+    // Profile fields only — balances and purchase totals are never edited here.
+    const customer = await Customer.findByIdAndUpdate(
+      id,
+      { $set: customerProfileFields(body) },
+      { new: true, runValidators: true },
+    );
     if (!customer) {
       return NextResponse.json({ error: "Customer not found" }, { status: 404 });
     }

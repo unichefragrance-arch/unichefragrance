@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import { Sale } from "@/lib/models";
 import { toJSON } from "@/lib/serialize";
+import mongoose from "mongoose";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { assertBranchAccess } from "@/lib/auth/guards";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -31,9 +33,17 @@ export async function GET(req: Request, context: RouteContext) {
 
     await connectDB();
     const { id } = await context.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid sale id" }, { status: 400 });
+    }
     const sale = await Sale.findById(id);
     if (!sale) {
       return NextResponse.json({ error: "Sale not found" }, { status: 404 });
+    }
+    // Branch isolation: another branch's sale (and its customer) stays hidden.
+    if (access) {
+      const denied = assertBranchAccess(access, sale.branchId ? String(sale.branchId) : null);
+      if (denied) return denied;
     }
     return NextResponse.json(mapSale(toJSON(sale)!));
   } catch (error) {
@@ -55,22 +65,42 @@ export async function PATCH(req: Request, context: RouteContext) {
 
     await connectDB();
     const { id } = await context.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid sale id" }, { status: 400 });
+    }
     const body = await req.json();
-    const sale = await Sale.findById(id);
+    const sale = await Sale.findById(id).select("status branchId").lean<{
+      status: string;
+      branchId?: unknown;
+    }>();
     if (!sale) {
       return NextResponse.json({ error: "Sale not found" }, { status: 404 });
     }
+    if (access) {
+      const denied = assertBranchAccess(access, sale.branchId ? String(sale.branchId) : null);
+      if (denied) return denied;
+    }
 
     if (body.status === "void") {
-      if (sale.status !== "held") {
+      // POS-101: atomic — of two tills discarding/completing the same held bill
+      // at once, exactly one wins; the other gets 409.
+      const voided = await Sale.findOneAndUpdate(
+        { _id: id, status: "held" },
+        { $set: { status: "void" } },
+        { returnDocument: "after" },
+      );
+      if (!voided) {
         return NextResponse.json(
-          { error: "Only held bills can be discarded" },
-          { status: 400 },
+          {
+            error:
+              sale.status === "held"
+                ? "This held bill was just completed or discarded on another till"
+                : "Only held bills can be discarded",
+          },
+          { status: sale.status === "held" ? 409 : 400 },
         );
       }
-      sale.status = "void";
-      await sale.save();
-      return NextResponse.json(mapSale(toJSON(sale)!));
+      return NextResponse.json(mapSale(toJSON(voided)!));
     }
 
     return NextResponse.json(

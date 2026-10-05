@@ -1,4 +1,12 @@
-export { createSale, resolveCustomerByPhone, FAST_WC } from "@/lib/sales/createSale";
+export {
+  createSale,
+  resolveCustomerByPhone,
+  resolveSalesperson,
+  trustedCustomerId,
+  normalizePaymentBreakdown,
+  creditPortion,
+  FAST_WC,
+} from "@/lib/sales/createSale";
 export { SaleError } from "@/lib/sales/errors";
 export {
   validateRemixSale,

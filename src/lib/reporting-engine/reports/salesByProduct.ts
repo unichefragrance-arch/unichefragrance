@@ -1,3 +1,4 @@
+import { roundMoney, roundQty } from "@/lib/money";
 import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Product, Sale } from "@/lib/models";
@@ -102,13 +103,13 @@ registerReport({
       product: g._id || "Unnamed item",
       category: g.category || "—",
       brand: g.brand || "—",
-      qty: Math.round(g.qty * 100) / 100,
-      revenue: Math.round(g.revenue * 100) / 100,
+      qty: roundQty(g.qty),
+      revenue: roundMoney(g.revenue),
     }));
 
     const totals = {
-      qty: Math.round(rows.reduce((s, r) => s + Number(r.qty || 0), 0) * 100) / 100,
-      revenue: Math.round(rows.reduce((s, r) => s + Number(r.revenue || 0), 0) * 100) / 100,
+      qty: roundQty(rows.reduce((s, r) => s + Number(r.qty || 0), 0)),
+      revenue: roundMoney(rows.reduce((s, r) => s + Number(r.revenue || 0), 0)),
     };
 
     return { rows, totals };

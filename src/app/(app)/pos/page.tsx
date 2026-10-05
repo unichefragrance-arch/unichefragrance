@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { roundMoney } from "@/lib/money";
 import {
   Banknote,
   CheckCircle2,
@@ -79,8 +80,9 @@ function digitsOnly(value: string) {
   return value.replace(/\D/g, "");
 }
 
+/** Money in the cart / mixed split — 3 decimals (OMR baisa), same as the server. */
 function round2(n: number) {
-  return Math.round(n * 100) / 100;
+  return roundMoney(n);
 }
 
 type CartLineType = "ready" | "remix" | "oil" | "refill" | "packaging";
@@ -354,6 +356,26 @@ function normalizePayment(value: string | undefined): PaymentMethod {
   return "cash";
 }
 
+const TILL_SALESPERSON_KEY = "unich.pos.salesperson";
+/** Held bills loaded for the menu; older ones are reached through search. */
+const HELD_LIST_LIMIT = 200;
+
+function readTillSalesperson(): string {
+  try {
+    return window.localStorage.getItem(TILL_SALESPERSON_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeTillSalesperson(name: string) {
+  try {
+    window.localStorage.setItem(TILL_SALESPERSON_KEY, name);
+  } catch {
+    // private mode / storage blocked — the choice still holds for this session
+  }
+}
+
 function createIdempotencyKey() {
   return typeof crypto !== "undefined" && crypto.randomUUID
     ? crypto.randomUUID()
@@ -383,7 +405,19 @@ function PosPageInner() {
     data: heldBills,
     reload: reloadHeld,
     setData: setHeldBills,
-  } = useApiData<HeldSale[]>("/api/sales?status=held&limit=50");
+  } = useApiData<HeldSale[]>(`/api/sales?status=held&limit=${HELD_LIST_LIMIT}`);
+  /** POS-099: search all held bills (name / phone) — not only the loaded ones. */
+  const [heldSearch, setHeldSearch] = useState("");
+  const [heldQuery, setHeldQuery] = useState("");
+  useEffect(() => {
+    const t = window.setTimeout(() => setHeldQuery(heldSearch.trim()), 300);
+    return () => window.clearTimeout(t);
+  }, [heldSearch]);
+  const { data: heldMatches, loading: heldSearching } = useApiData<HeldSale[]>(
+    heldQuery
+      ? `/api/sales?status=held&limit=50&q=${encodeURIComponent(heldQuery)}`
+      : null,
+  );
   const searchRef = useRef<HTMLInputElement>(null);
   const phoneLookupSeq = useRef(0);
   const [query, setQuery] = useState("");
@@ -394,11 +428,16 @@ function PosPageInner() {
   const [invoiceDiscount, setInvoiceDiscount] = useState<DiscountInput | null>(null);
   /** Which discount editor is open: a cart line key, or "invoice". */
   const [discountEditor, setDiscountEditor] = useState<string | null>(null);
-  /** POS-071: manager approval prompt for an over-limit discount. */
+  /**
+   * POS-071: manager approval prompt for an over-limit discount.
+   * `floorMessage`: POS-062 — the server found a line below its minimum price,
+   * which only the Admin can approve.
+   */
   const [approval, setApproval] = useState<{
     email: string;
     password: string;
     error: string | null;
+    floorMessage?: string;
   } | null>(null);
   const [approvingDiscount, setApprovingDiscount] = useState(false);
   const { user } = useAuth();
@@ -461,7 +500,13 @@ function PosPageInner() {
     router.replace("/pos");
   }
 
-  async function completeQuotationSale() {
+  /**
+   * QTN-06: convert the approved quotation. A price below the minimum needs
+   * the Admin (POS-062) — the server answers 403 and the Admin approval dialog
+   * resubmits with their credentials (the quotation converts once, so they
+   * can't be replayed against another sale).
+   */
+  async function completeQuotationSale(admin?: { email: string; password: string }) {
     if (!quotationMode) return;
     setCompletingQuotation(true);
     try {
@@ -470,8 +515,15 @@ function PosPageInner() {
         sale: { id: string; customerId?: string; total?: number };
       }>(`/api/quotations/${quotationMode.id}`, {
         method: "POST",
-        body: JSON.stringify({ action: "convert", payment }),
+        body: JSON.stringify({
+          action: "convert",
+          payment,
+          paymentBreakdown: payment === "mixed" ? mixedBreakdown : undefined,
+          salesperson,
+          ...(admin ? { approverEmail: admin.email, approverPassword: admin.password } : {}),
+        }),
       });
+      setApproval(null);
       flash(
         `Sale completed · ${formatMoney(res.sale.total ?? quotationMode.total)} · ${payment}`,
       );
@@ -485,7 +537,18 @@ function PosPageInner() {
       setEmail("");
       router.push(customerId ? `/customers/${customerId}` : "/customers");
     } catch (err) {
-      flash(err instanceof Error ? err.message : "Could not complete sale", 6000, "err");
+      const message = err instanceof Error ? err.message : "Could not complete sale";
+      const code = (err as { data?: { code?: string } }).data?.code;
+      if (code === "PRICE_FLOOR_APPROVAL_REQUIRED" || (admin && code === "DISCOUNT_NOT_AUTHORIZED")) {
+        setApproval((prev) => ({
+          email: admin?.email ?? prev?.email ?? "",
+          password: "",
+          error: admin ? message : null,
+          floorMessage: prev?.floorMessage ?? message,
+        }));
+      } else {
+        flash(message, 6000, "err");
+      }
     } finally {
       setCompletingQuotation(false);
     }
@@ -513,7 +576,22 @@ function PosPageInner() {
   const [holding, setHolding] = useState(false);
   const [resumingId, setResumingId] = useState<string | null>(null);
   const [discardingId, setDiscardingId] = useState<string | null>(null);
-  const [switchingSalesperson, setSwitchingSalesperson] = useState(false);
+  /**
+   * POS-093/094: this till's salesperson — sent with each bill, never written
+   * to the store-wide settings, so one till's choice can't change another's.
+   */
+  const [selectedSalesperson, setSelectedSalesperson] = useState("");
+  /**
+   * POS-098: the held bill this cart was resumed from. It stays held on the
+   * server until checkout closes it (atomically) or a re-hold updates it, so a
+   * failed or abandoned checkout never loses the bill.
+   */
+  const [resumedFromId, setResumedFromId] = useState<string | null>(null);
+  // Remembered per device (a till keeps its salesperson across reloads).
+  useEffect(() => {
+    const saved = readTillSalesperson();
+    if (saved) setSelectedSalesperson(saved);
+  }, []);
   const [remixOilId, setRemixOilId] = useState("");
   const [lastSale, setLastSale] = useState<LastSale | null>(null);
   const [saleDoneOpen, setSaleDoneOpen] = useState(false);
@@ -528,16 +606,25 @@ function PosPageInner() {
     Partial<Record<PackagingGroup, string>>
   >({});
   const inventory = products ?? emptyProducts;
-  const heldList = heldBills ?? emptyHeld;
+  const heldList = useMemo(
+    () => (heldBills ?? emptyHeld).filter((s) => s.id !== resumedFromId),
+    [heldBills, resumedFromId],
+  );
+  const heldMenuList = heldQuery
+    ? (heldMatches ?? emptyHeld).filter((s) => s.id !== resumedFromId)
+    : heldList;
   const salespeople = useMemo(() => {
     if (settings.data?.salespeople?.length) return settings.data.salespeople;
     return settings.data?.currentUserName ? [settings.data.currentUserName] : [];
   }, [settings.data]);
   const salesperson = useMemo(() => {
+    if (selectedSalesperson && salespeople.includes(selectedSalesperson)) {
+      return selectedSalesperson;
+    }
     const active = (settings.data?.activeSalesperson || "").trim();
     if (active && salespeople.includes(active)) return active;
     return salespeople[0] || "";
-  }, [settings.data?.activeSalesperson, salespeople]);
+  }, [selectedSalesperson, settings.data?.activeSalesperson, salespeople]);
 
   const defaultFormat: ReceiptFormat =
     settings.data?.receiptFormat === "a4" ? "a4" : "thermal";
@@ -737,28 +824,11 @@ function PosPageInner() {
     window.setTimeout(() => setToast(null), ms);
   }
 
-  async function switchSalesperson(name: string) {
-    if (!settings.data || name === salesperson) return;
-    setSwitchingSalesperson(true);
-    try {
-      const updated = await api<AppSettings>("/api/settings", {
-        method: "PUT",
-        body: JSON.stringify({
-          ...settings.data,
-          activeSalesperson: name,
-        }),
-      });
-      settings.setData(updated);
-      flash(`Salesperson · ${name}`);
-    } catch (err) {
-      flash(
-        err instanceof Error ? err.message : "Could not switch salesperson",
-        6000,
-        "err",
-      );
-    } finally {
-      setSwitchingSalesperson(false);
-    }
+  function switchSalesperson(name: string) {
+    if (name === salesperson) return;
+    setSelectedSalesperson(name);
+    writeTillSalesperson(name);
+    flash(`Salesperson · ${name}`);
   }
 
   /** Block cart growth past sellable stock (server re-checks at checkout). */
@@ -1128,6 +1198,10 @@ function PosPageInner() {
    * bound to this cart, then complete the sale with only the token.
    */
   async function approveAndCheckout(email: string, password: string) {
+    if (quotationMode) {
+      await completeQuotationSale({ email, password });
+      return;
+    }
     setApprovingDiscount(true);
     try {
       const res = await api<{ required: boolean; approvalToken?: string }>(
@@ -1144,11 +1218,12 @@ function PosPageInner() {
       );
       await checkout(res.approvalToken);
     } catch (err) {
-      setApproval({
+      setApproval((prev) => ({
         email,
         password: "",
         error: err instanceof Error ? err.message : "Approval failed",
-      });
+        floorMessage: prev?.floorMessage,
+      }));
     } finally {
       setApprovingDiscount(false);
     }
@@ -1157,7 +1232,7 @@ function PosPageInner() {
   async function checkout(approvalToken?: string) {
     if (cart.length === 0) return;
     if (!salesperson) {
-      flash("Set active salesperson in Settings → Sales Team", 6000, "err");
+      flash("Add a salesperson in Settings → Sales Team", 6000, "err");
       return;
     }
     if (!phone.trim()) {
@@ -1206,6 +1281,7 @@ function PosPageInner() {
       invoiceDiscount: pricing.invoice,
       matchedCustomerId,
       customerMatch,
+      resumedFromId,
     };
     // Clear cart immediately (same feel as Hold) — restore if save fails
     setCart([]);
@@ -1217,7 +1293,17 @@ function PosPageInner() {
     setCustomerMatch(null);
     setMatchedCustomerId(null);
     try {
-      const sale = await api<{ id: string; total?: number }>("/api/sales", {
+      // The response is the stored sale — the receipt is built from it, never
+      // from the cart (the server re-prices, so cart prices can be stale).
+      const sale = await api<{
+        id: string;
+        total?: number;
+        discountTotal?: number;
+        salesperson?: string;
+        payment?: string;
+        paymentBreakdown?: PaymentSplit[];
+        lines?: Array<{ name: string; qty: number; unitLabel?: string; unitPrice: number }>;
+      }>("/api/sales", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({
@@ -1231,25 +1317,35 @@ function PosPageInner() {
           lines: linesForApi(snapshot.cart),
           invoiceDiscount: snapshot.invoiceDiscount ?? undefined,
           discountApprovalToken: approvalToken,
+          resumedFromId: snapshot.resumedFromId ?? undefined,
         }),
       });
       setApproval(null);
+      setResumedFromId(null);
+      // POS-112/115: what the server recorded — print / WhatsApp must match the sale.
       const completed: LastSale = {
         id: sale.id,
         total: sale.total ?? snapshot.total,
-        discountTotal: snapshot.discountTotal,
+        discountTotal: sale.discountTotal ?? snapshot.discountTotal,
         customerName: snapshot.customerName,
         phone: snapshot.phone,
         email: snapshot.email,
-        payment: snapshot.payment,
-        paymentBreakdown: snapshot.paymentBreakdown,
-        salesperson: snapshot.salesperson,
-        lines: snapshot.cart.map((line) => ({
-          name: line.product.name,
-          qty: line.qty,
-          unitLabel: line.unitLabel,
-          unitPrice: line.unitPrice,
-        })),
+        payment: sale.payment ? sale.payment.toLowerCase() : snapshot.payment,
+        paymentBreakdown: sale.paymentBreakdown ?? snapshot.paymentBreakdown,
+        salesperson: sale.salesperson || snapshot.salesperson,
+        lines: Array.isArray(sale.lines)
+          ? sale.lines.map((line) => ({
+              name: line.name,
+              qty: line.qty,
+              unitLabel: line.unitLabel ?? "",
+              unitPrice: line.unitPrice,
+            }))
+          : snapshot.cart.map((line) => ({
+              name: line.product.name,
+              qty: line.qty,
+              unitLabel: line.unitLabel,
+              unitPrice: line.unitPrice,
+            })),
       };
       setLastSale(completed);
       setSaleDoneOpen(true);
@@ -1268,6 +1364,17 @@ function PosPageInner() {
       void reload({ silent: true });
       window.setTimeout(() => searchRef.current?.focus(), 100);
     } catch (err) {
+      const message = err instanceof Error ? err.message : "Could not complete sale";
+      const code = (err as { data?: { code?: string } }).data?.code;
+      if (code === "HELD_BILL_UNAVAILABLE") {
+        // Completed or discarded on another till — completing this copy too
+        // would duplicate the sale, so drop it.
+        setResumedFromId(null);
+        setApproval(null);
+        void reloadHeld({ silent: true });
+        flash(message, 7000, "err");
+        return;
+      }
       setCart(snapshot.cart);
       setPackagingPick(snapshot.packagingPick);
       setCustomerName(snapshot.customerName);
@@ -1277,14 +1384,21 @@ function PosPageInner() {
       setCustomerMatch(snapshot.customerMatch);
       setMatchedCustomerId(snapshot.matchedCustomerId);
       setInvoiceDiscount(snapshot.invoiceDiscount);
-      const message = err instanceof Error ? err.message : "Could not complete sale";
-      const code = (err as { data?: { code?: string } }).data?.code;
-      if (code === "DISCOUNT_APPROVAL_REQUIRED" || code === "DISCOUNT_NOT_AUTHORIZED") {
+      if (code === "PRICE_FLOOR_APPROVAL_REQUIRED") {
+        // Cost is server-only — the cashier learns about the floor from checkout.
+        setApproval((prev) => ({
+          email: prev?.email ?? "",
+          password: "",
+          error: approvalToken ? message : null,
+          floorMessage: message,
+        }));
+      } else if (code === "DISCOUNT_APPROVAL_REQUIRED" || code === "DISCOUNT_NOT_AUTHORIZED") {
         // Server limit is the source of truth — prompt even if the client didn't.
         setApproval((prev) => ({
           email: prev?.email ?? "",
           password: "",
           error: approvalToken ? message : null,
+          floorMessage: prev?.floorMessage,
         }));
       } else {
         flash(message, 6000, "err");
@@ -1354,16 +1468,34 @@ function PosPageInner() {
     };
   }
 
+  /**
+   * POS-102 pricing rule: a held bill completes at the CURRENT catalogue price
+   * (the server always re-prices at checkout), so the resumed cart shows that
+   * price too — what the cashier sees is what gets charged.
+   */
+  function currentUnitPrice(line: HeldSaleLine, product: Product | undefined): number {
+    if (!product) return line.unitPrice;
+    if (line.lineType === "oil") {
+      return line.deductMl ? Number((product.sellPrice * line.deductMl).toFixed(3)) : line.unitPrice;
+    }
+    // Refill is a fixed service rate owned by the backend, not a catalogue price.
+    if (line.lineType === "refill") return line.unitPrice;
+    return product.sellPrice;
+  }
+
   function cartFromHeld(sale: HeldSale): {
     lines: CartLine[];
     packaging: Partial<Record<PackagingGroup, string>>;
+    repriced: number;
   } {
     const packaging: Partial<Record<PackagingGroup, string>> = {};
+    let repriced = 0;
     const lines: CartLine[] = (sale.lines || []).map((line, index) => {
       const productId = line.productId ? String(line.productId) : "";
-      const product =
-        (productId && inventory.find((p) => p.id === productId)) ||
-        stubProductFromLine(line);
+      const found = productId ? inventory.find((p) => p.id === productId) : undefined;
+      const product = found || stubProductFromLine(line);
+      const unitPrice = currentUnitPrice(line, found);
+      if (Math.abs(unitPrice - line.unitPrice) > 0.0005) repriced += 1;
       const oilId = line.oilProductId ? String(line.oilProductId) : undefined;
       const oilProduct = oilId
         ? inventory.find((p) => p.id === oilId)
@@ -1379,7 +1511,7 @@ function PosPageInner() {
         product,
         qty: line.qty,
         unitLabel: line.unitLabel,
-        unitPrice: line.unitPrice,
+        unitPrice,
         lineType: line.lineType,
         deductMl: line.deductMl,
         bomNote: line.bomNote,
@@ -1389,7 +1521,7 @@ function PosPageInner() {
         discount: discountFromStored(line.discountType, line.discountValue),
       };
     });
-    return { lines, packaging };
+    return { lines, packaging, repriced };
   }
 
   async function holdBill() {
@@ -1402,7 +1534,7 @@ function PosPageInner() {
       return;
     }
     if (!salesperson) {
-      flash("Set active salesperson in Settings → Sales Team", 6000, "err");
+      flash("Add a salesperson in Settings → Sales Team", 6000, "err");
       return;
     }
     setHolding(true);
@@ -1418,6 +1550,7 @@ function PosPageInner() {
       invoiceDiscount: pricing.invoice,
       matchedCustomerId,
       customerMatch,
+      resumedFromId,
     };
     // Clear terminal immediately so the cashier feels instant feedback
     setCart([]);
@@ -1441,9 +1574,12 @@ function PosPageInner() {
           status: "held",
           lines: linesForApi(snapshot.cart),
           invoiceDiscount: snapshot.invoiceDiscount ?? undefined,
+          // Re-holding a resumed bill updates it instead of adding a copy.
+          resumedFromId: snapshot.resumedFromId ?? undefined,
         }),
       });
-      setHeldBills((prev) => [held, ...(prev ?? [])]);
+      setResumedFromId(null);
+      setHeldBills((prev) => [held, ...(prev ?? []).filter((s) => s.id !== held.id)]);
       flash("Bill held — resume anytime");
     } catch (err) {
       // Restore cart if save failed
@@ -1467,13 +1603,17 @@ function PosPageInner() {
       return;
     }
     setResumingId(sale.id);
-    const { lines, packaging } = cartFromHeld(sale);
+    const { lines, packaging, repriced } = cartFromHeld(sale);
     if (lines.length === 0) {
       setResumingId(null);
       flash("Held bill has no lines", 4000, "err");
       return;
     }
-    // Optimistic: restore cart + drop from held list immediately
+    // The bill stays held on the server until checkout closes it or a re-hold
+    // updates it — nothing is voided here, so nothing can be lost.
+    setResumedFromId(sale.id);
+    setHeldMenuOpen(false);
+    setHeldSearch("");
     setCart(lines);
     setPackagingPick(packaging);
     setInvoiceDiscount(
@@ -1490,6 +1630,10 @@ function PosPageInner() {
         : "",
     );
     setPayment(normalizePayment(sale.payment));
+    // The held bill keeps its salesperson; the cashier can still change it.
+    if (sale.salesperson && salespeople.includes(sale.salesperson)) {
+      setSelectedSalesperson(sale.salesperson);
+    }
     if (sale.payment === "mixed" && Array.isArray(sale.paymentBreakdown)) {
       const restored = { ...emptyMixedAmounts };
       for (const entry of sale.paymentBreakdown) {
@@ -1499,25 +1643,24 @@ function PosPageInner() {
     } else {
       setMixedAmounts(emptyMixedAmounts);
     }
-    setHeldBills((prev) => (prev ?? []).filter((s) => s.id !== sale.id));
-    try {
-      await api(`/api/sales/${sale.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: "void" }),
-      });
-      flash(`Resumed bill · ${formatMoney(sale.total)}`);
-    } catch (err) {
-      setCart([]);
-      resetDiscounts();
-      setPackagingPick({});
-      setCustomerName("");
-      setPhone("");
-      setHeldBills((prev) => [sale, ...(prev ?? []).filter((s) => s.id !== sale.id)]);
-      flash(err instanceof Error ? err.message : "Could not resume bill", 6000, "err");
-    } finally {
-      setResumingId(null);
-    }
+    setResumingId(null);
+    flash(
+      repriced > 0
+        ? `Resumed bill · ${repriced} line${repriced === 1 ? "" : "s"} repriced to today's price`
+        : "Resumed bill",
+      repriced > 0 ? 6000 : 3000,
+      repriced > 0 ? "err" : "ok",
+    );
   }
+
+  // Resumed cart emptied by hand → the bill was never closed, so it simply
+  // shows up in the held list again.
+  useEffect(() => {
+    if (cart.length === 0 && resumedFromId && !checkingOut && !holding) {
+      setResumedFromId(null);
+      void reloadHeld({ silent: true });
+    }
+  }, [cart.length, resumedFromId, checkingOut, holding, reloadHeld]);
 
   async function discardHeld(sale: HeldSale) {
     setDiscardingId(sale.id);
@@ -1529,7 +1672,8 @@ function PosPageInner() {
       });
       flash("Held bill discarded");
     } catch (err) {
-      setHeldBills((prev) => [sale, ...(prev ?? []).filter((s) => s.id !== sale.id)]);
+      // Server truth (it may have just been completed on another till).
+      void reloadHeld({ silent: true });
       flash(
         err instanceof Error ? err.message : "Could not discard bill",
         6000,
@@ -2118,12 +2262,13 @@ function PosPageInner() {
                     <X className="h-3 w-3" />
                     Exit
                   </button>
-                ) : salespeople.length > 0 ? (
+                ) : null}
+                {/* Shown in quotation mode too: a converted quotation needs a salesperson. */}
+                {salespeople.length > 0 ? (
                   <select
                     value={salesperson}
-                    disabled={switchingSalesperson}
-                    onChange={(e) => void switchSalesperson(e.target.value)}
-                    title="Active salesperson"
+                    onChange={(e) => switchSalesperson(e.target.value)}
+                    title="Salesperson for this bill"
                     className="h-8 max-w-[9rem] truncate rounded-full border border-line bg-mist px-2 text-[11px] outline-none focus:border-gold disabled:opacity-60"
                   >
                     {salespeople.map((name) => (
@@ -2746,13 +2891,31 @@ function PosPageInner() {
                 </button>
 
                 {heldMenuOpen ? (
-                  <div className="absolute bottom-full left-0 right-0 z-30 mb-1 max-h-56 space-y-1.5 overflow-y-auto rounded-xl border border-line bg-canvas p-2 shadow-lg">
+                  <div className="absolute bottom-full left-0 right-0 z-30 mb-1 max-h-72 space-y-1.5 overflow-y-auto rounded-xl border border-line bg-canvas p-2 shadow-lg">
+                    <input
+                      type="search"
+                      value={heldSearch}
+                      onChange={(e) => setHeldSearch(e.target.value)}
+                      placeholder="Search held bills · name or phone"
+                      aria-label="Search held bills"
+                      className="h-8 w-full rounded-lg border border-line bg-paper px-2.5 text-xs text-ink outline-none focus:border-gold"
+                    />
+                    {!heldQuery && (heldBills?.length ?? 0) >= HELD_LIST_LIMIT ? (
+                      <p className="px-2 py-1 text-[11px] text-ink-muted">
+                        Showing the latest {HELD_LIST_LIMIT} — search to find older bills.
+                      </p>
+                    ) : null}
+                    {heldQuery && !heldSearching && heldMenuList.length === 0 ? (
+                      <p className="px-2 py-1.5 text-[11px] text-ink-muted">
+                        No held bill matches “{heldQuery}”.
+                      </p>
+                    ) : null}
                     {cart.length > 0 ? (
                       <p className="px-2 py-1.5 text-[11px] text-ink-muted">
                         Complete or clear the cart before resuming a held bill.
                       </p>
                     ) : null}
-                    {heldList.map((sale) => {
+                    {heldMenuList.map((sale) => {
                       const lineCount = sale.lines?.length ?? 0;
                       const busy =
                         resumingId === sale.id || discardingId === sale.id;
@@ -2819,7 +2982,7 @@ function PosPageInner() {
       {approval ? (
         <div
           className="fixed inset-0 z-50 flex items-end justify-center bg-ink/45 p-4 sm:items-center"
-          onClick={() => !checkingOut && !approvingDiscount && setApproval(null)}
+          onClick={() => !checkingOut && !approvingDiscount && !completingQuotation && setApproval(null)}
         >
           <form
             role="dialog"
@@ -2828,7 +2991,7 @@ function PosPageInner() {
             className="animate-fade-up w-full max-w-sm rounded-2xl border border-line bg-canvas p-5 shadow-xl"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
-              if (e.key === "Escape" && !checkingOut && !approvingDiscount) setApproval(null);
+              if (e.key === "Escape" && !checkingOut && !approvingDiscount && !completingQuotation) setApproval(null);
             }}
             onSubmit={(e) => {
               e.preventDefault();
@@ -2840,11 +3003,17 @@ function PosPageInner() {
             }}
           >
             <h3 id="discount-approval-title" className="font-semibold text-lg text-ink">
-              Manager approval
+              {approval.floorMessage ? "Admin approval" : "Manager approval"}
             </h3>
             <p className="mt-1 text-sm text-ink-muted">
-              {pricing.maxDiscountPct}% discount (−{formatMoney(pricing.discountTotal)}) is over
-              your {discountLimit}% limit. A manager or owner must approve it.
+              {approval.floorMessage ? (
+                approval.floorMessage
+              ) : (
+                <>
+                  {pricing.maxDiscountPct}% discount (−{formatMoney(pricing.discountTotal)}) is over
+                  your {discountLimit}% limit. A manager or owner must approve it.
+                </>
+              )}
             </p>
             <label className="mt-3 block text-xs font-medium text-ink-muted">
               Approver email
@@ -2879,7 +3048,7 @@ function PosPageInner() {
                 type="button"
                 variant="secondary"
                 size="sm"
-                disabled={checkingOut || approvingDiscount}
+                disabled={checkingOut || approvingDiscount || completingQuotation}
                 onClick={() => setApproval(null)}
               >
                 Cancel
@@ -2888,9 +3057,9 @@ function PosPageInner() {
                 type="submit"
                 variant="gold"
                 size="sm"
-                disabled={checkingOut || approvingDiscount}
+                disabled={checkingOut || approvingDiscount || completingQuotation}
               >
-                {checkingOut || approvingDiscount ? "Approving…" : "Approve & complete"}
+                {checkingOut || approvingDiscount || completingQuotation ? "Approving…" : "Approve & complete"}
               </Button>
             </div>
           </form>

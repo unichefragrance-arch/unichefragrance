@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
-import { Customer } from "@/lib/models";
+import { Customer, Sale } from "@/lib/models";
 import { sendEmail } from "@/lib/notifications/email";
 import { logDelivery } from "@/lib/notifications/log";
 import { normalizePhone } from "@/lib/notifications/phone";
@@ -21,6 +21,7 @@ import { receiptSmsText, receiptText } from "@/lib/receipt/text";
 import type { ReceiptLine } from "@/lib/receipt/types";
 import type { DeliveryKind } from "@/lib/types";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { assertBranchAccess } from "@/lib/auth/guards";
 
 type Channel = "email" | "whatsapp" | "sms";
 type LegacyChannel = Channel | "both";
@@ -116,6 +117,18 @@ export async function POST(req: Request) {
     if (access !== null && isAuthResponse(access)) return access;
 
     const body = (await req.json()) as Body;
+    // A stored sale's receipt (customer details included) is branch-isolated
+    // like GET /api/sales/:id — no sending another branch's receipt.
+    if (body.saleId && access) {
+      await connectDB();
+      const sale = await Sale.findById(body.saleId)
+        .select("branchId")
+        .lean<{ branchId?: unknown }>()
+        .catch(() => null);
+      if (!sale) return NextResponse.json({ error: "Sale not found" }, { status: 404 });
+      const denied = assertBranchAccess(access, sale.branchId ? String(sale.branchId) : null);
+      if (denied) return denied;
+    }
     const channels = resolveChannels(body);
     const kind: DeliveryKind = body.kind || "custom";
 
@@ -278,17 +291,20 @@ async function buildContent(input: {
   receiptNo?: string;
 }> {
   const { body, kind, channels, toPhone, toEmail, customerName } = input;
-  const override = body.message?.trim();
+  // A receipt's text is always generated — never caller-supplied free text,
+  // which would go out under the store's name with a real receipt number.
+  const override = kind === "receipt" ? undefined : body.message?.trim();
   const wantsHtml = channels.includes("email") && !override;
 
   if (kind === "receipt") {
     const settings = input.settings ?? (await loadReceiptSettings());
-    // Prefer client-provided lines — avoids a Sale.findById round-trip (~0.5–2s on Atlas).
-    const hasClientLines = Array.isArray(body.lines) && body.lines.length > 0;
-    const doc = hasClientLines
-      ? buildReceiptDoc({
-          saleId: body.saleId,
-          draft: !body.saleId,
+    // POS-113: a completed sale's receipt comes from the stored sale only —
+    // client lines / totals / payment / customer are ignored. Client data is
+    // used just for an unsaved cart, and that is always marked as a draft.
+    const doc = body.saleId
+      ? await receiptDocForSale(body.saleId, { settings })
+      : buildReceiptDoc({
+          draft: true,
           customer: { name: customerName, phone: toPhone, email: toEmail },
           salesperson: body.salesperson,
           payment: body.payment,
@@ -296,27 +312,20 @@ async function buildContent(input: {
           total: body.total,
           discountTotal: body.discountTotal,
           settings,
-        })
-      : body.saleId
-        ? await receiptDocForSale(body.saleId, { settings })
-        : buildReceiptDoc({
-            draft: true,
-            customer: { name: customerName, phone: toPhone, email: toEmail },
-            salesperson: body.salesperson,
-            payment: body.payment,
-            lines: body.lines ?? [],
-            total: body.total,
-            discountTotal: body.discountTotal,
-            settings,
-          });
+        });
 
     if (!doc) {
       throw new Error("Sale not found for this receipt");
     }
+    if (body.saleId && toEmail) {
+      // The stored receipt carries the sale's customer; keep the address the
+      // cashier typed for delivery only.
+      doc.customer.email = toEmail;
+    }
 
     return {
       subject: `${doc.store.name} Receipt ${doc.receiptNo}`,
-      text: override || receiptText(doc),
+      text: receiptText(doc),
       sms: receiptSmsText(doc),
       html: wantsHtml ? renderReceiptHtml(doc, "a4") : undefined,
       receiptNo: doc.receiptNo,

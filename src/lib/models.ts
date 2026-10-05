@@ -424,6 +424,9 @@ const SaleLineSchema = new Schema(
     oilMl: Number,
     formulaId: { type: Schema.Types.ObjectId, ref: "Formula" },
     packagingProductIds: [{ type: Schema.Types.ObjectId, ref: "Product" }],
+    /** POS-110: custom-blend notes carried over from the quotation. */
+    bottleNote: String,
+    designNote: String,
     /** POS-069: item-level discount as entered + the amount it took off. */
     discountType: { type: String, enum: ["percent", "amount"] },
     discountValue: Number,
@@ -479,6 +482,22 @@ const SaleSchema = new Schema(
       enum: ["completed", "held", "void"],
       default: "completed",
     },
+    /** POS-104: the quotation this sale was converted from. */
+    quotationId: { type: Schema.Types.ObjectId, ref: "Quotation", default: undefined },
+    quotationNumber: { type: String, default: undefined },
+    /**
+     * VAT added on top of the price (quotations). Absent on POS sales, whose
+     * shelf prices already include VAT at the store rate.
+     */
+    vatPercent: { type: Number, default: undefined },
+    vatAmount: { type: Number, default: undefined },
+    /** POS-098: on a completed sale — the held bill it was resumed from. */
+    resumedFromId: { type: Schema.Types.ObjectId, ref: "Sale", default: undefined },
+    /**
+     * On a held bill closed by checkout (status void) — the sale it became.
+     * A void bill without it was discarded.
+     */
+    completedSaleId: { type: Schema.Types.ObjectId, ref: "Sale", default: undefined },
     lines: [SaleLineSchema],
     /** Gross, before discounts. */
     subtotal: { type: Number, required: true },

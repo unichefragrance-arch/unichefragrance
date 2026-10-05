@@ -1,3 +1,4 @@
+import { moneyText, roundMoney } from "@/lib/money";
 import { NextResponse } from "next/server";
 import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
@@ -102,7 +103,7 @@ export async function GET(req: Request) {
     const transactionsToday = today?.totals[0]?.count ?? 0;
     const avgSaleValue =
       transactionsToday > 0
-        ? Math.round((todayTotal / transactionsToday) * 100) / 100
+        ? roundMoney((todayTotal / transactionsToday))
         : 0;
 
     // POS dashboard charts — how today's till is being paid, and what's
@@ -110,7 +111,7 @@ export async function GET(req: Request) {
     const paymentMix = (today?.payments ?? [])
       .map(({ _id: method, amount, count }) => ({
         method: String(method).charAt(0).toUpperCase() + String(method).slice(1),
-        amount: Math.round(amount * 100) / 100,
+        amount: roundMoney(amount),
         count,
       }))
       .sort((a, b) => b.amount - a.amount);
@@ -118,7 +119,7 @@ export async function GET(req: Request) {
       name,
       qty: Math.round(qty * 1000) / 1000,
       unit: unit || "",
-      revenue: Math.round(revenue * 100) / 100,
+      revenue: roundMoney(revenue),
     }));
 
     const products = await Product.find().lean();
@@ -143,7 +144,7 @@ export async function GET(req: Request) {
     const categoryRows = Array.from(categoryTotals.entries())
       .map(([category, { value, count }]) => ({
         category,
-        value: Math.round(value * 100) / 100,
+        value: roundMoney(value),
         count,
       }))
       .sort((a, b) => b.value - a.value);
@@ -157,7 +158,7 @@ export async function GET(req: Request) {
             categoryRows.slice(TOP_CATEGORIES - 1).reduce(
               (acc, row) => ({
                 category: "Other",
-                value: Math.round((acc.value + row.value) * 100) / 100,
+                value: roundMoney((acc.value + row.value)),
                 count: acc.count + row.count,
               }),
               { category: "Other", value: 0, count: 0 },
@@ -246,7 +247,7 @@ export async function GET(req: Request) {
     const expenseByCategory = Array.from(expenseCategoryTotals.entries())
       .map(([category, amount]) => ({
         category,
-        amount: Math.round(amount * 100) / 100,
+        amount: roundMoney(amount),
       }))
       .sort((a, b) => b.amount - a.amount);
 
@@ -255,8 +256,8 @@ export async function GET(req: Request) {
       createdAt: { $gte: startOfMonth },
       ...branchFilter,
     });
-    const grossProfit = Math.round((monthRevenue - monthCost) * 100) / 100;
-    const netProfit = Math.round((grossProfit - monthExpenseTotal) * 100) / 100;
+    const grossProfit = roundMoney((monthRevenue - monthCost));
+    const netProfit = roundMoney((grossProfit - monthExpenseTotal));
     // Replaces the old hardcoded 42.6 stub — both margins now move with
     // actual sales/cost/expense data instead of showing a fixed number.
     const grossMarginPct =
@@ -304,7 +305,7 @@ export async function GET(req: Request) {
     const topReceivables = receivableCustomers.slice(0, 5).map((c) => ({
       id: String(c._id),
       name: c.name,
-      balance: Math.round((c.creditBalance || 0) * 100) / 100,
+      balance: roundMoney((c.creditBalance || 0)),
     }));
 
     const payableSuppliers = await Supplier.find({
@@ -317,10 +318,10 @@ export async function GET(req: Request) {
     const topPayables = payableSuppliers.slice(0, 5).map((sup) => ({
       id: String(sup._id),
       name: sup.name,
-      balance: Math.round((sup.outstanding || 0) * 100) / 100,
+      balance: roundMoney((sup.outstanding || 0)),
     }));
 
-    const netCash = Math.round((todayTotal - todayExpenseTotal) * 100) / 100;
+    const netCash = roundMoney((todayTotal - todayExpenseTotal));
 
     const alerts = [
       ...(canInventory
@@ -361,7 +362,7 @@ export async function GET(req: Request) {
               id: "weekly-report",
               type: "report" as const,
               title: "Weekly sales report ready",
-              detail: `Last 7 days · OMR ${weekTotal.toFixed(2)} total`,
+              detail: `Last 7 days · ${moneyText(weekTotal)} total`,
               severity: "info" as const,
             },
           ]
@@ -374,7 +375,7 @@ export async function GET(req: Request) {
                     id: "receivables-summary",
                     type: "receivables" as const,
                     title: `${receivableCustomers.length} customer${receivableCustomers.length === 1 ? "" : "s"} with outstanding balance`,
-                    detail: `OMR ${accountsReceivable.toFixed(2)} total receivable`,
+                    detail: `${moneyText(accountsReceivable)} total receivable`,
                     severity: "warning" as const,
                   },
                 ]
@@ -385,7 +386,7 @@ export async function GET(req: Request) {
                     id: "payables-summary",
                     type: "payables" as const,
                     title: `${payableSuppliers.length} supplier${payableSuppliers.length === 1 ? "" : "s"} with outstanding balance`,
-                    detail: `OMR ${accountsPayable.toFixed(2)} total payable`,
+                    detail: `${moneyText(accountsPayable)} total payable`,
                     severity: "warning" as const,
                   },
                 ]

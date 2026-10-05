@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { connectDB } from "@/lib/db";
 import { FifoLayer, Product } from "@/lib/models";
 import { registerReport } from "../registry";
@@ -48,7 +49,7 @@ registerReport({
           purchaseDate: new Date(l.purchaseDate).toISOString().slice(0, 10),
           ageDays,
           qtyRemaining: l.qtyRemaining,
-          value: Math.round(l.qtyRemaining * l.unitCost * 100) / 100,
+          value: roundMoney(l.qtyRemaining * l.unitCost),
         };
       })
       .filter((r) => r.ageDays >= minAgeDays)
@@ -57,7 +58,7 @@ registerReport({
     const totals = {
       layers: rows.length,
       qtyRemaining: rows.reduce((s, r) => s + Number(r.qtyRemaining || 0), 0),
-      value: Math.round(rows.reduce((s, r) => s + Number(r.value || 0), 0) * 100) / 100,
+      value: roundMoney(rows.reduce((s, r) => s + Number(r.value || 0), 0)),
     };
 
     return { rows, totals };

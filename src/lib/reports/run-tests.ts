@@ -18,6 +18,8 @@ import {
   parseValuationBucket,
   type ValuationProductInput,
 } from "./inventoryValuation";
+import { moneyText, roundMoney, roundQty } from "../money";
+import { computeQuotationTotals } from "../quotation/calc";
 
 let passed = 0;
 let failed = 0;
@@ -287,6 +289,30 @@ test("CSV export escapes commas, quotes, and newlines in names", () => {
 test("CSV export handles an empty report without throwing", () => {
   const csv = buildInventoryValuationCsv(buildInventoryValuation([]));
   assert.ok(csv.startsWith("Section,Category,SKUs,Qty,Inventory Value,% of Total"));
+});
+
+// OMR has 3 decimals (baisa) — report / dashboard / quotation money must keep them.
+test("roundMoney keeps baisa: 6.892 stays 6.892, float noise is removed", () => {
+  assert.equal(roundMoney(6.892), 6.892);
+  assert.equal(roundMoney(0.1 + 0.2), 0.3);
+  assert.equal(roundMoney(1.0005), 1.001);
+  assert.equal(roundMoney(Number.NaN), 0);
+  assert.equal(roundQty(12.3456), 12.346);
+});
+
+test("summing many 3-decimal sales does not drift (was 2-decimal rounding)", () => {
+  const totals = Array.from({ length: 100 }, () => 6.892);
+  assert.equal(roundMoney(totals.reduce((s, t) => s + t, 0)), 689.2);
+});
+
+test("moneyText prints 3 decimals for alerts and SMS", () => {
+  assert.equal(moneyText(1234.5), "OMR 1234.500");
+  assert.equal(moneyText(0.125, "OMR"), "OMR 0.125");
+});
+
+test("quotation totals keep baisa (VAT 5% on 10.125)", () => {
+  const t = computeQuotationTotals([{ qty: 1, unitPrice: 10.125 }], 5);
+  assert.deepEqual(t, { subtotal: 10.125, vatAmount: 0.506, total: 10.631 });
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
+import { roundMoney } from "@/lib/money";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, LoadingState, useApiData } from "@/components/ui/DataState";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -81,7 +82,7 @@ export default function PurchasesPage() {
       totals.set(po.supplierId, bucket);
     }
     return Array.from(totals.entries())
-      .map(([id, b]) => ({ id, name: b.name, value: Math.round(b.value * 100) / 100 }))
+      .map(([id, b]) => ({ id, name: b.name, value: roundMoney(b.value) }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 6);
   }, [purchaseList]);
@@ -95,7 +96,7 @@ export default function PurchasesPage() {
   }, [purchaseDraft]);
   const draftVatAmount = useMemo(() => {
     if (!purchaseDraft) return 0;
-    return Math.round(draftSubtotal * (Number(purchaseDraft.vatPercent || 0) / 100) * 100) / 100;
+    return roundMoney(draftSubtotal * (Number(purchaseDraft.vatPercent || 0) / 100));
   }, [draftSubtotal, purchaseDraft]);
   const draftTotal = draftSubtotal + draftVatAmount;
 

@@ -1,3 +1,4 @@
+import { roundMoney, roundQty } from "@/lib/money";
 import { connectDB } from "@/lib/db";
 import { Product, ProductionOrder } from "@/lib/models";
 import { registerReport } from "../registry";
@@ -57,13 +58,13 @@ registerReport({
       formula: g._id.formula || "—",
       material: g._id.material || "—",
       unit: g.unit || "—",
-      qty: Math.round(g.qty * 100) / 100,
-      cost: Math.round(g.cost * 100) / 100,
+      qty: roundQty(g.qty),
+      cost: roundMoney(g.cost),
     }));
 
     const totals = {
-      qty: Math.round(rows.reduce((s, r) => s + Number(r.qty || 0), 0) * 100) / 100,
-      cost: Math.round(rows.reduce((s, r) => s + Number(r.cost || 0), 0) * 100) / 100,
+      qty: roundQty(rows.reduce((s, r) => s + Number(r.qty || 0), 0)),
+      cost: roundMoney(rows.reduce((s, r) => s + Number(r.cost || 0), 0)),
     };
 
     return { rows, totals };

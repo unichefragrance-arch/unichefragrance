@@ -1,3 +1,4 @@
+import { moneyText } from "@/lib/money";
 import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Customer, Product, Sale, Supplier } from "@/lib/models";
@@ -89,7 +90,7 @@ export async function buildAlerts(session: AppSession): Promise<AlertItem[]> {
       id: "weekly-report",
       type: "report",
       title: "Weekly sales report ready",
-      detail: `Last 7 days · OMR ${weekTotal.toFixed(2)} total`,
+      detail: `Last 7 days · ${moneyText(weekTotal)} total`,
       severity: "info",
     });
   }
@@ -105,7 +106,7 @@ export async function buildAlerts(session: AppSession): Promise<AlertItem[]> {
         id: "receivables-summary",
         type: "receivables",
         title: `${receivableCustomers.length} customer${receivableCustomers.length === 1 ? "" : "s"} with outstanding balance`,
-        detail: `OMR ${accountsReceivable.toFixed(2)} total receivable`,
+        detail: `${moneyText(accountsReceivable)} total receivable`,
         severity: "warning",
       });
     }
@@ -120,7 +121,7 @@ export async function buildAlerts(session: AppSession): Promise<AlertItem[]> {
         id: "payables-summary",
         type: "payables",
         title: `${payableSuppliers.length} supplier${payableSuppliers.length === 1 ? "" : "s"} with outstanding balance`,
-        detail: `OMR ${accountsPayable.toFixed(2)} total payable`,
+        detail: `${moneyText(accountsPayable)} total payable`,
         severity: "warning",
       });
     }

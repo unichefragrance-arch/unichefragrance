@@ -690,6 +690,166 @@ async function main() {
       assert.deepEqual([body.lines[0].discountType, body.lines[0].discountValue], ["amount", 100]);
       assert.deepEqual([body.invoiceDiscountType, body.invoiceDiscountValue], ["percent", 1]);
     });
+
+    // POS-097..103 hold / resume. Own product so stock maths is independent.
+    const holdProduct = await Product.create({
+      sku: `HOLD-E2E-${tag}`,
+      name: "E2E Hold Item",
+      category: "Perfume",
+      unit: "pcs",
+      sellPrice: 100,
+      stockSellable: 20,
+    });
+    await FifoLayer.create({
+      productId: holdProduct._id,
+      supplierId,
+      supplierName: "E2E Hold Supplier",
+      purchaseDate: new Date(),
+      qtyRemaining: 20,
+      unitCost: 40,
+      currency: "OMR",
+    });
+    const idH = String(holdProduct._id);
+    const holdStock = async () =>
+      (await Product.findById(idH).lean<{ stockSellable: number }>())!.stockSellable;
+    const sessionFor = (userId: string, branchId: string | null) =>
+      `unich_session=${createSessionToken({
+        userId,
+        name: "E2E Till",
+        email: `e2e-till-${userId}@test.local`,
+        role: "cashier",
+        roleLabel: "Cashier",
+        branchId,
+        branchName: branchId ? "E2E Branch" : null,
+      })}`;
+    const call = async (method: string, path: string, body?: unknown, asCookie = cookie) => {
+      const res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: { "Content-Type": "application/json", Cookie: asCookie },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: res.status, body: (await res.json().catch(() => ({}))) as SaleResponse & Record<string, unknown> };
+    };
+    const holdBill = (lines: unknown[], extra: Record<string, unknown> = {}, asCookie = cookie) =>
+      call("POST", "/api/sales", { customerPhone: PHONE, payment: "cash", status: "held", lines, ...extra }, asCookie);
+
+    try {
+      await test("POS-097: hold prices on the server, rejects unknown products, takes no stock", async () => {
+        const before = await holdStock();
+        const held = await holdBill([{ productId: idH, qty: 2, lineType: "ready", unitPrice: 0.001 }]);
+        assert.equal(held.status, 201, JSON.stringify(held.body));
+        assert.equal(held.body.total, 200, "client unitPrice must not be stored");
+        assert.equal(await holdStock(), before);
+        const ghost = await holdBill([
+          { productId: String(new mongoose.Types.ObjectId()), qty: 1, lineType: "ready", unitPrice: 5 },
+        ]);
+        assert.equal(ghost.status, 400);
+      });
+
+      await test("POS-098/§18: two tills complete one resumed bill at once → exactly one sale, linked", async () => {
+        const held = await holdBill([{ productId: idH, qty: 1, lineType: "ready" }]);
+        const before = await holdStock();
+        const [a, b] = await Promise.all(
+          [cookie, sessionFor("000000000000000000000022", null)].map((c) =>
+            call(
+              "POST",
+              "/api/sales",
+              {
+                customerPhone: PHONE,
+                payment: "cash",
+                lines: [{ productId: idH, qty: 1, lineType: "ready" }],
+                resumedFromId: held.body.id,
+                idempotencyKey: randomUUID(),
+              },
+              c,
+            ),
+          ),
+        );
+        const statuses = [a.status, b.status].sort();
+        assert.deepEqual(statuses, [201, 409], JSON.stringify([a.body, b.body]));
+        const sale = [a, b].find((r) => r.status === 201)!.body;
+        const heldDoc = await Sale.findById(held.body.id).lean<{ status: string; completedSaleId?: unknown }>();
+        assert.equal(heldDoc!.status, "void");
+        assert.equal(String(heldDoc!.completedSaleId), String(sale.id));
+        assert.equal(String(sale.resumedFromId), String(held.body.id));
+        assert.equal(before - (await holdStock()), 1, "stock deducted once");
+      });
+
+      await test("POS-103/§11: failed checkout leaves the bill held; re-hold updates it in place", async () => {
+        const held = await holdBill([{ productId: idH, qty: 50, lineType: "ready" }]);
+        const failed = await call("POST", "/api/sales", {
+          customerPhone: PHONE,
+          payment: "cash",
+          lines: [{ productId: idH, qty: 50, lineType: "ready" }],
+          resumedFromId: held.body.id,
+          idempotencyKey: randomUUID(),
+        });
+        assert.equal(failed.status, 400);
+        assert.equal(failed.body.code, "INSUFFICIENT_STOCK");
+        assert.equal((await Sale.findById(held.body.id).lean<{ status: string }>())!.status, "held");
+        const reheld = await holdBill([{ productId: idH, qty: 3, lineType: "ready" }], { resumedFromId: held.body.id });
+        assert.equal(reheld.status, 201);
+        assert.equal(reheld.body.id, held.body.id, "same bill, not a copy");
+        const doc = await Sale.findById(held.body.id).lean<{ status: string; lines: { qty: number }[] }>();
+        assert.deepEqual([doc!.status, doc!.lines[0].qty], ["held", 3]);
+      });
+
+      await test("POS-101/§18: discard is atomic — two discards at once, exactly one succeeds", async () => {
+        const held = await holdBill([{ productId: idH, qty: 1, lineType: "ready" }]);
+        const rs = await Promise.all([1, 2].map(() => call("PATCH", `/api/sales/${held.body.id}`, { status: "void" })));
+        // The loser sees 409 (raced) or 400 (already void by the time it read).
+        assert.equal(rs.filter((r) => r.status === 200).length, 1, JSON.stringify(rs.map((r) => r.status)));
+        assert.ok(rs.every((r) => [200, 400, 409].includes(r.status)));
+      });
+
+      await test("§14: another branch can't read, discard or complete a held bill", async () => {
+        const branch1 = sessionFor("000000000000000000000023", String(new mongoose.Types.ObjectId()));
+        const branch2 = sessionFor("000000000000000000000024", String(new mongoose.Types.ObjectId()));
+        const held = await holdBill([{ productId: idH, qty: 1, lineType: "ready" }], {}, branch1);
+        assert.equal(held.status, 201);
+        assert.equal((await call("GET", `/api/sales/${held.body.id}`, undefined, branch2)).status, 403);
+        assert.equal((await call("PATCH", `/api/sales/${held.body.id}`, { status: "void" }, branch2)).status, 403);
+        const steal = await call(
+          "POST",
+          "/api/sales",
+          {
+            customerPhone: PHONE,
+            payment: "cash",
+            lines: [{ productId: idH, qty: 1, lineType: "ready" }],
+            resumedFromId: held.body.id,
+            idempotencyKey: randomUUID(),
+          },
+          branch2,
+        );
+        assert.equal(steal.status, 409);
+        assert.equal((await call("GET", `/api/sales/${held.body.id}`, undefined, branch1)).status, 200);
+      });
+
+      await test("§14: another customer's id is ignored — no rename, no credit on their account", async () => {
+        const victim = await Customer.create({ phone: `+968 9${String(tag).slice(-7)}`, name: "E2E Victim" });
+        try {
+          const r = await call("POST", "/api/sales", {
+            customerPhone: PHONE,
+            customerName: "Not The Victim",
+            customerId: String(victim._id),
+            payment: "credit",
+            lines: [{ productId: idH, qty: 1, lineType: "ready" }],
+            idempotencyKey: randomUUID(),
+          });
+          assert.equal(r.status, 201, JSON.stringify(r.body));
+          const after = await Customer.findById(victim._id).lean<{ name: string; creditBalance?: number }>();
+          assert.equal(after!.name, "E2E Victim");
+          assert.ok(!(after!.creditBalance! > 0), `credit ${after!.creditBalance}`);
+          const sale = await Sale.findById(r.body.id).lean<{ customerId: unknown }>();
+          assert.notEqual(String(sale!.customerId), String(victim._id));
+        } finally {
+          await Customer.deleteOne({ _id: victim._id });
+        }
+      });
+    } finally {
+      await FifoLayer.deleteMany({ productId: holdProduct._id });
+      await Product.deleteOne({ _id: holdProduct._id });
+    }
   } finally {
     await DiscountApproval.deleteMany({ approverUserId: { $in: approvers.map((u: { _id: unknown }) => String(u._id)) } });
     await User.deleteMany({ _id: { $in: approvers.map((u: { _id: unknown }) => u._id) } });

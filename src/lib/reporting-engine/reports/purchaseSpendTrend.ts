@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { PurchaseOrder } from "@/lib/models";
@@ -58,16 +59,16 @@ registerReport({
       .map(([date, b]) => ({
         date,
         orders: b.orders,
-        ordered: Math.round(b.ordered * 100) / 100,
-        received: Math.round(b.received * 100) / 100,
-        pending: Math.round((b.ordered - b.received) * 100) / 100,
+        ordered: roundMoney(b.ordered),
+        received: roundMoney(b.received),
+        pending: roundMoney((b.ordered - b.received)),
       }));
 
     const totals = {
       orders: rows.reduce((s, r) => s + Number(r.orders || 0), 0),
-      ordered: Math.round(rows.reduce((s, r) => s + Number(r.ordered || 0), 0) * 100) / 100,
-      received: Math.round(rows.reduce((s, r) => s + Number(r.received || 0), 0) * 100) / 100,
-      pending: Math.round(rows.reduce((s, r) => s + Number(r.pending || 0), 0) * 100) / 100,
+      ordered: roundMoney(rows.reduce((s, r) => s + Number(r.ordered || 0), 0)),
+      received: roundMoney(rows.reduce((s, r) => s + Number(r.received || 0), 0)),
+      pending: roundMoney(rows.reduce((s, r) => s + Number(r.pending || 0), 0)),
     };
 
     return { rows, totals };

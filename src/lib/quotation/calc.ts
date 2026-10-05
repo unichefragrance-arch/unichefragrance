@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 export type QuotationCalcLine = {
   qty: number;
   unitPrice: number;
@@ -23,6 +24,7 @@ export function computeQuotationTotals(
   return { subtotal, vatAmount, total };
 }
 
+/** Kept for callers; money is rounded to 3 decimals (OMR baisa) — see lib/money. */
 export function round2(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
+  return roundMoney(value);
 }

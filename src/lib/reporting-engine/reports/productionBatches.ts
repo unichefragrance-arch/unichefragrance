@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { connectDB } from "@/lib/db";
 import { ProductionOrder } from "@/lib/models";
 import { registerReport } from "../registry";
@@ -50,7 +51,7 @@ registerReport({
         expectedYieldMl: o.yieldMl,
         actualYieldMl: o.actualYieldMl ?? null,
         wastageMl: o.wastageMl ?? 0,
-        materialCost: Math.round(materialCost * 100) / 100,
+        materialCost: roundMoney(materialCost),
         completedAt: o.completedAt ? new Date(o.completedAt).toISOString().slice(0, 10) : null,
       };
     });
@@ -58,7 +59,7 @@ registerReport({
     const totals = {
       batches: rows.length,
       wastageMl: rows.reduce((s, r) => s + Number(r.wastageMl || 0), 0),
-      materialCost: Math.round(rows.reduce((s, r) => s + Number(r.materialCost || 0), 0) * 100) / 100,
+      materialCost: roundMoney(rows.reduce((s, r) => s + Number(r.materialCost || 0), 0)),
     };
 
     return { rows, totals };

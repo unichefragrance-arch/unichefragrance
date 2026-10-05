@@ -1,4 +1,5 @@
 import { canAccessReportCategory, resolveBranchScope } from "./access";
+import { canAccessAllBranches } from "@/lib/auth/roles";
 import { ReportAccessDeniedError, ReportNotFoundError } from "./errors";
 import { previousPeriodFilters } from "./filters";
 import { getReport } from "./registry";
@@ -19,6 +20,12 @@ export async function executeReport(
   const branchId = definition.branchScoped
     ? resolveBranchScope(ctx.session, rawFilters.branchId)
     : rawFilters.branchId;
+  // A branch-scoped role with no branch would otherwise resolve to "no filter"
+  // — every branch. Non-owner accounts always get a branch (api/users), so this
+  // is a broken account: refuse, like assertBranchAccess does.
+  if (definition.branchScoped && branchId === null && !canAccessAllBranches(ctx.session.role)) {
+    throw new ReportAccessDeniedError(id);
+  }
   const filters: ReportFilters = { ...rawFilters, branchId };
 
   const { rows, totals } = await definition.run(ctx, filters);

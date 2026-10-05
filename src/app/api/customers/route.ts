@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
+import { customerProfileFields } from "@/lib/customers/profileFields";
 import { Customer } from "@/lib/models";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
@@ -81,9 +82,10 @@ export async function POST(req: Request) {
       }
     }
 
+    // New customers start with zero balance / purchases — never client-set.
     const customer = await Customer.create({
-      ...body,
-      lastVisit: body.lastVisit ? new Date(body.lastVisit) : new Date(),
+      ...customerProfileFields(body),
+      lastVisit: new Date(),
     });
     return NextResponse.json(mapCustomer(toJSON(customer)!), { status: 201 });
   } catch (error) {

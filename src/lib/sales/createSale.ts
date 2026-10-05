@@ -22,6 +22,11 @@ import {
   type DiscountApprover,
 } from "@/lib/sales/discountApproval";
 import {
+  checkPriceFloor,
+  needsAdminForFloor,
+  priceFloorMessage,
+} from "@/lib/sales/priceFloor";
+import {
   validateSaleLines,
   type IncomingSaleLine,
   type ValidatedSaleLine,
@@ -64,17 +69,17 @@ export type CreateSaleInput = {
    */
   discountApprovalToken?: string | null;
   status?: "completed" | "held" | "void";
+  /**
+   * POS-098: the held bill this cart was resumed from. Completing closes that
+   * bill in the same transaction (only if it is still held — so one held bill
+   * can never become two sales); re-holding updates it in place.
+   */
+  resumedFromId?: string | null;
   idempotencyKey?: string;
   /** BRN-08: stamp from session when present */
   branchId?: string | null;
   branchName?: string | null;
 };
-
-/** Short TTL cache — AppSettings rarely changes during a POS shift. */
-let salespersonCache:
-  | { at: number; salespeople: string[]; active: string }
-  | null = null;
-const SALESPERSON_CACHE_MS = 120_000;
 
 /** Primary-only ack — much faster than connection-string w=majority on Atlas. */
 export const FAST_WC = { w: 1 as const, j: false };
@@ -88,49 +93,41 @@ function isDuplicateKey(err: unknown): boolean {
   );
 }
 
-async function resolveSalesperson(value?: string) {
-  const now = Date.now();
-  if (!salespersonCache || now - salespersonCache.at > SALESPERSON_CACHE_MS) {
-    const settings = await AppSettings.findOne({ key: "default" })
-      .select("salespeople activeSalesperson")
-      .lean();
-    const configured = Array.isArray(settings?.salespeople)
-      ? settings.salespeople
-          .map((name: unknown) => String(name).trim())
-          .filter(Boolean)
-      : [];
-    if (configured.length === 0) {
-      throw new SaleError(
-        "VALIDATION",
-        "Set an active salesperson in Settings → Sales Team",
-      );
-    }
-    const active = String(
-      (settings as { activeSalesperson?: string } | null)?.activeSalesperson ||
-        "",
-    ).trim();
-    salespersonCache = { at: now, salespeople: configured, active };
+/**
+ * POS-093/094: the salesperson travels with each bill (one till's choice never
+ * affects another). It must be on the Settings → Sales Team list — an unknown
+ * name is rejected, not silently swapped. Only a bill with no salesperson
+ * falls back to the store default (`activeSalesperson`).
+ * Read fresh every time (not cached): a salesperson removed in Settings must
+ * stop being accepted at once, on every server instance. Checkout runs this
+ * alongside line validation, so it adds no latency.
+ */
+export async function resolveSalesperson(value?: unknown): Promise<string> {
+  if (value != null && typeof value !== "string") {
+    throw new SaleError("VALIDATION", "Salesperson must be a name");
   }
+  const requested = typeof value === "string" ? value.trim() : "";
+  await connectDB();
+  const settings = await AppSettings.findOne({ key: "default" })
+    .select("salespeople activeSalesperson")
+    .lean<{ salespeople?: unknown[]; activeSalesperson?: string }>();
+  const salespeople = Array.isArray(settings?.salespeople)
+    ? settings.salespeople.map((name) => String(name).trim()).filter(Boolean)
+    : [];
+  if (salespeople.length === 0) {
+    throw new SaleError("VALIDATION", "Add a salesperson in Settings → Sales Team");
+  }
+  const find = (name: string) =>
+    salespeople.find((s) => s.toLowerCase() === name.toLowerCase());
 
-  const { salespeople, active } = salespersonCache;
-  const activeMatch = salespeople.find(
-    (name: string) => name.toLowerCase() === active.toLowerCase(),
-  );
-  if (activeMatch) return activeMatch;
-
-  const requested = value?.trim();
   if (requested) {
-    const matched = salespeople.find(
-      (name: string) => name.toLowerCase() === requested.toLowerCase(),
-    );
+    const matched = find(requested);
     if (matched) return matched;
     throw new SaleError("VALIDATION", `Unknown salesperson: ${requested}`);
   }
-
-  throw new SaleError(
-    "VALIDATION",
-    "Set an active salesperson in Settings → Sales Team",
-  );
+  const active = find(String(settings?.activeSalesperson ?? "").trim());
+  if (active) return active;
+  throw new SaleError("VALIDATION", "Select a salesperson (Settings → Sales Team)");
 }
 
 /** CRM-02/CRM-12: capture what a customer buys at order time — no manual re-entry in CRM. */
@@ -286,7 +283,7 @@ const SPLIT_METHODS = new Set(["cash", "card", "bank", "credit"]);
  * Validates and normalizes a mixed-payment breakdown against the sale total.
  * Held bills (whose total may still change) skip the sum check.
  */
-function normalizePaymentBreakdown(
+export function normalizePaymentBreakdown(
   payment: string,
   breakdown: PaymentSplitInput[] | undefined,
   total: number,
@@ -328,7 +325,7 @@ function normalizePaymentBreakdown(
   return normalized;
 }
 
-function creditPortion(payment: string, subtotal: number, breakdown: { method: string; amount: number }[]) {
+export function creditPortion(payment: string, subtotal: number, breakdown: { method: string; amount: number }[]) {
   if (payment === "credit") return subtotal;
   if (payment === "mixed") {
     return breakdown.find((e) => e.method === "credit")?.amount || 0;
@@ -424,93 +421,77 @@ function auditForInsert(audit: DeductionAuditEntry[]) {
   }));
 }
 
-const HELD_LINE_TYPES = new Set([
-  "ready",
-  "remix",
-  "oil",
-  "refill",
-  "packaging",
-  "wholesale",
-]);
+/**
+ * A client-sent customerId is honoured only when that customer's phone is the
+ * bill's phone — otherwise any cashier could charge a sale (or credit) to, and
+ * rename, an arbitrary customer. A mismatch falls back to lookup by phone.
+ */
+export async function trustedCustomerId(
+  id: string | undefined,
+  phone: string,
+): Promise<string | null> {
+  if (!id || !mongoose.isValidObjectId(id)) return null;
+  const customer = await Customer.findById(id)
+    .select("phone")
+    .lean<{ _id: unknown; phone?: string }>();
+  if (!customer) return null;
+  const want = phoneDigits(phone);
+  return want.length > 0 && phoneDigits(customer.phone ?? "") === want
+    ? String(customer._id)
+    : null;
+}
 
+/** Held bills a session may reach: its own branch plus legacy unbranched ones. */
+function heldBranchFilter(branchId?: string | null): Record<string, unknown> {
+  const oid = asObjectId(branchId ?? undefined);
+  return oid
+    ? { $or: [{ branchId: oid }, { branchId: null }, { branchId: { $exists: false } }] }
+    : {};
+}
+
+/**
+ * POS-097: hold = the same server-side validation and pricing as checkout
+ * (products must exist, prices come from the catalogue, never the client) but
+ * no stock check or deduction and no approval — those happen on completion.
+ * Re-holding a resumed bill updates that bill in place instead of leaving a
+ * second copy behind.
+ */
 async function holdSale(input: CreateSaleInput) {
   await connectDB();
-  const salesperson = await resolveSalesperson(input.salesperson);
-
   if (!input.customerPhone?.trim()) {
     throw new SaleError("VALIDATION", "Customer phone is required");
   }
   if (!Array.isArray(input.lines) || input.lines.length === 0) {
     throw new SaleError("VALIDATION", "At least one line item is required");
   }
-
   const phone = input.customerPhone.trim();
-  const lines: ValidatedSaleLine[] = [];
-  let subtotal = 0;
 
-  for (let i = 0; i < input.lines.length; i++) {
-    const raw = input.lines[i];
-    const qty = Number(raw.qty);
-    // Same whole-unit rule as checkout, so a held bill can always be completed.
-    if (!Number.isInteger(qty) || qty <= 0) {
-      throw new SaleError("INVALID_LINE", `Invalid quantity for line ${i + 1}`);
-    }
-    if (!HELD_LINE_TYPES.has(raw.lineType)) {
-      throw new SaleError("INVALID_LINE", `Invalid line type: ${raw.lineType}`);
-    }
-    const unitPrice = Number(raw.unitPrice);
-    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-      throw new SaleError("INVALID_LINE", `Invalid price for line ${i + 1}`);
-    }
-    const name = (raw.name || "").trim() || "Item";
-    lines.push({
-      productId: raw.productId,
-      name,
-      qty,
-      unitLabel: raw.unitLabel || "pcs",
-      unitPrice,
-      lineType: raw.lineType as ValidatedSaleLine["lineType"],
-      bomNote: raw.bomNote,
-      deductMl: raw.deductMl,
-      oilProductId: raw.oilProductId,
-      oilMl: raw.oilMl,
-      packagingProductIds: raw.packagingProductIds,
-      formulaId: raw.formulaId,
-    });
-    subtotal += qty * unitPrice;
-  }
+  const [salesperson, validated, knownId] = await Promise.all([
+    resolveSalesperson(input.salesperson),
+    validateSaleLines(input.lines),
+    trustedCustomerId(input.customerId, phone),
+  ]);
+  const { lines, subtotal } = validated;
   // Validated (bad input rejected) but not approved — approval happens at checkout.
   const breakdown = discountsFor(lines, input.lines, input.invoiceDiscount, subtotal);
 
   const givenName = input.customerName?.trim();
-  const knownId =
-    input.customerId && mongoose.isValidObjectId(input.customerId)
-      ? input.customerId
-      : null;
   const productNames = productNamesFromLines(lines);
+  const touch = {
+    ...(givenName ? { $set: { name: givenName } } : {}),
+    ...(productNames.length > 0
+      ? { $addToSet: { productsRequested: { $each: productNames } } }
+      : {}),
+  };
 
   let customerId: mongoose.Types.ObjectId;
   if (knownId) {
     customerId = new mongoose.Types.ObjectId(knownId);
-    void Customer.updateOne(
-      { _id: customerId },
-      {
-        ...(givenName ? { $set: { name: givenName } } : {}),
-        ...(productNames.length > 0
-          ? { $addToSet: { productsRequested: { $each: productNames } } }
-          : {}),
-      },
-      { writeConcern: FAST_WC },
-    ).catch(() => {
+    void Customer.updateOne({ _id: customerId }, touch, { writeConcern: FAST_WC }).catch(() => {
       /* non-blocking */
     });
   } else {
-    customerId = await resolveCustomerByPhone(phone, givenName, {
-      ...(givenName ? { $set: { name: givenName } } : {}),
-      ...(productNames.length > 0
-        ? { $addToSet: { productsRequested: { $each: productNames } } }
-        : {}),
-    });
+    customerId = await resolveCustomerByPhone(phone, givenName, touch);
   }
 
   const payment = normalizePayment(input.payment);
@@ -518,27 +499,46 @@ async function holdSale(input: CreateSaleInput) {
   const paymentBreakdown = normalizePaymentBreakdown(payment, input.paymentBreakdown, subtotal, false);
   const displayName = givenName || "Walk-in Customer";
   const now = new Date();
-  const _id = new mongoose.Types.ObjectId();
-  const doc = {
-    _id,
+  const fields = {
     customerPhone: phone,
     customerName: displayName,
     customerId,
     salesperson,
     payment,
-    ...(paymentBreakdown.length > 0 ? { paymentBreakdown } : {}),
+    paymentBreakdown,
     status: "held" as const,
     lines: linesForInsert(lines, breakdown),
     ...discountFields(breakdown),
+    invoiceDiscountType: breakdown.invoiceDiscount?.type ?? null,
+    invoiceDiscountValue: breakdown.invoiceDiscount?.value ?? null,
     saleType: resolveSaleType(lines),
     inventoryDeductions: [],
     ...(asObjectId(input.branchId ?? undefined)
       ? { branchId: asObjectId(input.branchId ?? undefined) }
       : {}),
     ...(input.branchName ? { branchName: input.branchName } : {}),
-    createdAt: now,
     updatedAt: now,
   };
+
+  const resumedId = asObjectId(input.resumedFromId ?? undefined);
+  if (resumedId) {
+    const updated = await Sale.collection.findOneAndUpdate(
+      { _id: resumedId, status: "held", ...heldBranchFilter(input.branchId) },
+      { $set: fields },
+      { returnDocument: "after", writeConcern: FAST_WC },
+    );
+    if (updated) {
+      return {
+        sale: { ...updated, id: String(resumedId) },
+        deduplicated: false as const,
+        timingMs: undefined,
+      };
+    }
+    // Completed or discarded elsewhere meanwhile — keep this cart as a new bill.
+  }
+
+  const _id = new mongoose.Types.ObjectId();
+  const doc = { _id, ...fields, createdAt: now };
   await Sale.collection.insertOne(doc, { writeConcern: FAST_WC });
 
   return {
@@ -581,15 +581,16 @@ export async function createSale(input: CreateSaleInput) {
   const phone = input.customerPhone.trim();
   const idempotencyKey = input.idempotencyKey?.trim() || undefined;
   const givenName = input.customerName?.trim();
-  const knownCustomerId =
-    input.customerId && mongoose.isValidObjectId(input.customerId)
-      ? input.customerId
-      : null;
   const payment = normalizePayment(input.payment);
+  const resumedFromId = input.resumedFromId ? asObjectId(input.resumedFromId) : undefined;
+  if (input.resumedFromId && !resumedFromId) {
+    throw new SaleError("VALIDATION", "Invalid held bill id");
+  }
 
-  const [salesperson, validated] = await Promise.all([
+  const [salesperson, validated, knownCustomerId] = await Promise.all([
     resolveSalesperson(input.salesperson),
     validateSaleLines(input.lines),
+    trustedCustomerId(input.customerId, phone),
   ]);
   const breakdown = discountsFor(
     validated.lines,
@@ -598,8 +599,15 @@ export async function createSale(input: CreateSaleInput) {
     validated.subtotal,
   );
   const actor = input.actor ?? null;
+  // POS-060..067: the final price (server price − every discount) is checked
+  // against cost + minimum margin here, never trusting a client flag.
+  const floorViolations = await checkPriceFloor(validated, breakdown);
+  const priceFloor = needsAdminForFloor(floorViolations, actor?.role)
+    ? { message: priceFloorMessage(floorViolations) }
+    : null;
   const needsApproval =
-    breakdown.discountTotal > 0 && exceedsDiscountLimit(breakdown, actor?.role);
+    (breakdown.discountTotal > 0 && exceedsDiscountLimit(breakdown, actor?.role)) ||
+    priceFloor !== null;
   const approvalToken = needsApproval ? String(input.discountApprovalToken ?? "") : "";
   const approver: DiscountApprover | null = needsApproval
     ? await verifyDiscountApproval(
@@ -607,6 +615,7 @@ export async function createSale(input: CreateSaleInput) {
         breakdown,
         actor,
         cartFingerprint(input.lines, input.invoiceDiscount),
+        priceFloor,
       )
     : null;
   // Mixed payment must cover the amount actually charged — after discounts.
@@ -705,6 +714,7 @@ export async function createSale(input: CreateSaleInput) {
               }
             : {}),
           saleType: resolveSaleType(validated.lines),
+          ...(resumedFromId ? { resumedFromId } : {}),
           // Omit when absent: the native driver would store null, and the
           // sparse unique index treats null as a value — so the 2nd keyless
           // sale would fail with E11000.
@@ -723,6 +733,21 @@ export async function createSale(input: CreateSaleInput) {
         // idempotency key) fails here with E11000 and gets the original sale,
         // instead of failing on an approval its twin already used.
         await Sale.collection.insertOne(saleDoc, { session });
+        if (resumedFromId) {
+          // Atomic claim: if another till already completed or discarded this
+          // bill, nothing matches and the whole sale rolls back.
+          const closed = await Sale.collection.updateOne(
+            { _id: resumedFromId, status: "held", ...heldBranchFilter(input.branchId) },
+            { $set: { status: "void", completedSaleId: _id, updatedAt: new Date() } },
+            { session },
+          );
+          if (closed.matchedCount === 0) {
+            throw new SaleError(
+              "HELD_BILL_UNAVAILABLE",
+              "This held bill was already completed or discarded on another till",
+            );
+          }
+        }
         if (approver) await consumeDiscountApproval(approvalToken, _id, session);
         // 2) Hot stock/layer writes last, just before commit (see planFifoDeductions).
         if (planned.plan) await applyFifoPlan(planned.plan, session);

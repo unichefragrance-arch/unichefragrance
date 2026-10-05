@@ -6,6 +6,7 @@ import { SaleError } from "@/lib/sales/errors";
 import { warmSaleCaches } from "@/lib/sales/validateSale";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { branchScopeFilter } from "@/lib/auth/guards";
 import { canViewCostPrices } from "@/lib/auth/roles";
 import { recordAudit } from "@/lib/audit/log";
 import { escapeRegex, loosePhoneRegex, phoneDigits } from "@/lib/phone";
@@ -39,7 +40,13 @@ export async function GET(req: Request) {
       /* non-fatal */
     });
     const { searchParams } = new URL(req.url);
-    const limit = Number(searchParams.get("limit") || 20);
+    const requestedLimit = Number(searchParams.get("limit") || 20);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(Math.max(Math.trunc(requestedLimit), 1), 500)
+      : 20;
+    // POS-099: held-bill search (customer name or phone) so bills beyond the
+    // list cap stay reachable.
+    const q = searchParams.get("q")?.trim().slice(0, 64);
     const status = searchParams.get("status") || "completed";
     const phone = searchParams.get("phone")?.trim();
     const customerId = searchParams.get("customerId")?.trim();
@@ -49,20 +56,10 @@ export async function GET(req: Request) {
     if (status !== "all") {
       conditions.push({ status: status as "completed" | "held" | "void" });
     }
-    if (
-      access &&
-      "role" in access &&
-      access.role !== "owner" &&
-      access.branchId
-    ) {
-      conditions.push({
-        $or: [
-          { branchId: access.branchId },
-          { branchId: null },
-          { branchId: { $exists: false } },
-        ],
-      });
-    }
+    // Branch isolation — a non-owner with no branch sees only unbranched
+    // (legacy) sales, never every branch.
+    const branchFilter = access && "role" in access ? branchScopeFilter(access) : null;
+    if (branchFilter) conditions.push(branchFilter);
     if (customerId && phone) {
       // CRM-02: purchase history — match either the linked customerId or the
       // phone on record, since historical/seeded sales may only carry a phone.
@@ -87,6 +84,15 @@ export async function GET(req: Request) {
           digits.length >= 7
             ? { $regex: loosePhoneRegex(digits) }
             : { $regex: escapeRegex(phone), $options: "i" },
+      });
+    }
+    if (q) {
+      const digits = phoneDigits(q);
+      conditions.push({
+        $or: [
+          { customerName: { $regex: escapeRegex(q), $options: "i" } },
+          ...(digits.length >= 3 ? [{ customerPhone: { $regex: loosePhoneRegex(digits) } }] : []),
+        ],
       });
     }
     const filter = conditions.length > 0 ? { $and: conditions } : {};
@@ -140,6 +146,7 @@ export async function POST(req: Request) {
         : null,
       discountApprovalToken: body.discountApprovalToken,
       status: body.status,
+      resumedFromId: typeof body.resumedFromId === "string" ? body.resumedFromId : undefined,
       idempotencyKey: body.idempotencyKey || headerKey,
       branchId: access?.branchId ?? undefined,
       branchName: access?.branchName ?? undefined,
@@ -187,11 +194,15 @@ export async function POST(req: Request) {
       (error instanceof Error &&
         (error.name === "ValidationError" || error.name === "CastError"));
     // POS-071/072: over-limit discount needs approval / approval refused → 403.
+    // POS-062: below the minimum price without Admin approval → 403.
     const isDiscountDenied =
       error instanceof SaleError &&
       (error.code === "DISCOUNT_APPROVAL_REQUIRED" ||
-        error.code === "DISCOUNT_NOT_AUTHORIZED");
-    const status = isDiscountDenied ? 403 : isClientError ? 400 : 500;
+        error.code === "DISCOUNT_NOT_AUTHORIZED" ||
+        error.code === "PRICE_FLOOR_APPROVAL_REQUIRED");
+    // POS-098: the resumed held bill was completed/discarded elsewhere → 409.
+    const isConflict = error instanceof SaleError && error.code === "HELD_BILL_UNAVAILABLE";
+    const status = isConflict ? 409 : isDiscountDenied ? 403 : isClientError ? 400 : 500;
     return NextResponse.json(
       {
         error: message,

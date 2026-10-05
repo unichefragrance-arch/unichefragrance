@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { connectDB } from "@/lib/db";
 import { Product } from "@/lib/models";
 import { registerReport } from "../registry";
@@ -44,14 +45,14 @@ registerReport({
         available: p.stockSellable,
         tester: p.stockTester,
         status: p.stockSellable === 0 ? "Out of stock" : low ? "Low stock" : "OK",
-        valuation: Math.round(p.stockSellable * p.costFifo * 100) / 100,
+        valuation: roundMoney(p.stockSellable * p.costFifo),
       };
     });
 
     const totals = {
       products: rows.length,
       lowStockCount: rows.filter((r) => r.status !== "OK").length,
-      valuation: Math.round(rows.reduce((s, r) => s + Number(r.valuation || 0), 0) * 100) / 100,
+      valuation: roundMoney(rows.reduce((s, r) => s + Number(r.valuation || 0), 0)),
     };
 
     return { rows, totals };

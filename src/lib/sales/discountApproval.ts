@@ -5,6 +5,7 @@ import { DiscountApproval, User } from "@/lib/models";
 import { verifyPasswordAsync } from "@/lib/auth/password";
 import { clearLoginAttempts, reserveLoginAttempt } from "@/lib/auth/rateLimit";
 import { SaleError } from "@/lib/sales/errors";
+import { PRICE_FLOOR_APPROVER_ROLE } from "@/lib/sales/priceFloor";
 import {
   discountLimitFor,
   exceedsDiscountLimit,
@@ -32,9 +33,35 @@ export type DiscountApprover = {
 };
 
 /**
+ * POS-060..067: set when a line sells below its minimum price and the actor is
+ * not the Admin — the approver must then be the Admin (owner).
+ */
+export type PriceFloorRequirement = { message: string } | null | undefined;
+
+function requiredError(
+  breakdown: DiscountBreakdown,
+  actor: DiscountActor | null,
+  priceFloor: PriceFloorRequirement,
+): SaleError {
+  if (priceFloor) return new SaleError("PRICE_FLOOR_APPROVAL_REQUIRED", priceFloor.message);
+  return new SaleError(
+    "DISCOUNT_APPROVAL_REQUIRED",
+    `Discount of ${breakdown.maxDiscountPct}% exceeds your ${discountLimitFor(actor?.role)}% limit — manager approval required`,
+  );
+}
+
+function adminOnlyError(name: string): SaleError {
+  return new SaleError(
+    "DISCOUNT_NOT_AUTHORIZED",
+    `Selling below the minimum price needs Admin approval — ${name} is not an Admin`,
+  );
+}
+
+/**
  * POS-071/072: a discount within the actor's role limit passes as-is (null).
  * Above it, a manager/owner must approve with their own credentials, and
  * their role limit must cover the discount — otherwise the sale is blocked.
+ * A below-minimum-price sale (`priceFloor`) needs the Admin as approver.
  * Approver passwords share the login rate limit, so this can't be used to
  * brute-force an account — the attempt is reserved atomically before the
  * password is checked, so parallel guesses can't outrun the lockout.
@@ -43,20 +70,16 @@ export async function resolveDiscountApproval(
   breakdown: DiscountBreakdown,
   actor: DiscountActor | null,
   approval: DiscountApprovalInput | null | undefined,
+  priceFloor?: PriceFloorRequirement,
 ): Promise<DiscountApprover | null> {
-  if (breakdown.discountTotal <= 0) return null;
-  if (!exceedsDiscountLimit(breakdown, actor?.role)) return null;
+  const discountNeedsApproval =
+    breakdown.discountTotal > 0 && exceedsDiscountLimit(breakdown, actor?.role);
+  if (!discountNeedsApproval && !priceFloor) return null;
 
   const pct = breakdown.maxDiscountPct;
-  const ownLimit = discountLimitFor(actor?.role);
   const email = approval?.email?.trim().toLowerCase();
   const password = approval?.password ?? "";
-  if (!email || !password) {
-    throw new SaleError(
-      "DISCOUNT_APPROVAL_REQUIRED",
-      `Discount of ${pct}% exceeds your ${ownLimit}% limit — manager approval required`,
-    );
-  }
+  if (!email || !password) throw requiredError(breakdown, actor, priceFloor);
 
   await connectDB();
   const [rl, user] = await Promise.all([
@@ -85,6 +108,7 @@ export async function resolveDiscountApproval(
   }
   void clearLoginAttempts(email);
 
+  if (priceFloor && user.role !== PRICE_FLOOR_APPROVER_ROLE) throw adminOnlyError(user.name);
   const approverLimit = discountLimitFor(user.role);
   if (breakdown.rawMaxDiscountPct > approverLimit + 1e-9) {
     throw new SaleError(
@@ -175,15 +199,10 @@ export async function verifyDiscountApproval(
   breakdown: DiscountBreakdown,
   actor: DiscountActor | null,
   fingerprint: string,
+  priceFloor?: PriceFloorRequirement,
 ): Promise<DiscountApprover> {
   const pct = breakdown.maxDiscountPct;
-  const ownLimit = discountLimitFor(actor?.role);
-  if (!token || typeof token !== "string") {
-    throw new SaleError(
-      "DISCOUNT_APPROVAL_REQUIRED",
-      `Discount of ${pct}% exceeds your ${ownLimit}% limit — manager approval required`,
-    );
-  }
+  if (!token || typeof token !== "string") throw requiredError(breakdown, actor, priceFloor);
   await connectDB();
   const doc = await DiscountApproval.findOne({ token }).lean<ApprovalDoc>();
   if (
@@ -194,9 +213,13 @@ export async function verifyDiscountApproval(
     doc.expiresAt.getTime() <= Date.now()
   ) {
     throw new SaleError(
-      "DISCOUNT_APPROVAL_REQUIRED",
+      priceFloor ? "PRICE_FLOOR_APPROVAL_REQUIRED" : "DISCOUNT_APPROVAL_REQUIRED",
       "Approval is missing, expired, or for a different bill — ask the manager to approve again",
     );
+  }
+  // A manager's discount approval doesn't cover a below-minimum price.
+  if (priceFloor && doc.approverRole !== PRICE_FLOOR_APPROVER_ROLE) {
+    throw new SaleError("PRICE_FLOOR_APPROVAL_REQUIRED", priceFloor.message);
   }
   // Prices are re-read at checkout: the approver's limit must still cover it.
   if (breakdown.rawMaxDiscountPct > discountLimitFor(doc.approverRole) + 1e-9) {

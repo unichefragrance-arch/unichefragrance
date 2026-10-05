@@ -10,6 +10,7 @@ import {
   type SaleReportStatus,
 } from "@/lib/reports/salesReport";
 import { isAuthResponse, requireApiAccess } from "@/lib/auth/apiGuard";
+import { branchScopeFilter } from "@/lib/auth/guards";
 
 export const runtime = "nodejs";
 
@@ -32,6 +33,8 @@ export async function GET(req: Request) {
       period,
       anchor: parseAnchorDate(date),
       limit: Number(searchParams.get("limit") || 2000),
+      // Non-owners see only their own branch (plus legacy unbranched sales).
+      branchFilter: access ? branchScopeFilter(access) : null,
     });
     const buffer = buildSaleReportExcel(report);
     const stamp = report.label.replace(/[^\w.-]+/g, "_");

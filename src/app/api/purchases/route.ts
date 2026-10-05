@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import { PurchaseOrder } from "@/lib/models";
@@ -100,8 +101,8 @@ export async function POST(req: Request) {
         : Number(body.subtotal ?? body.total ?? 0);
     const itemCount = lines.length > 0 ? lines.length : Number(body.itemCount || 0);
     const vatPercent = Math.max(0, Number(body.vatPercent ?? 5));
-    const vatAmount = Math.round(subtotal * (vatPercent / 100) * 100) / 100;
-    const total = Math.round((subtotal + vatAmount) * 100) / 100;
+    const vatAmount = roundMoney(subtotal * (vatPercent / 100));
+    const total = roundMoney(subtotal + vatAmount);
 
     const purchase = await PurchaseOrder.create({
       supplierId: body.supplierId,

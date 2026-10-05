@@ -12,6 +12,7 @@
     "test:e2e:sales": "tsx --env-file=.env src/lib/sales/run-e2e-tests.ts",
     "test:e2e:fifo": "tsx --env-file=.env src/lib/inventory/run-fifo-tests.ts",
     "test:load:sales": "tsx --env-file=.env src/lib/sales/run-load-tests.ts",
+    "test:qa": "tsx --env-file=.env tests/qa/run.ts",
     "db:seed": "tsx --env-file=.env scripts/seed.ts",
     "db:seed-accountant": "tsx --env-file=.env scripts/seed-accountant-reports.ts",
     "db:health": "tsx --env-file=.env scripts/health.ts",

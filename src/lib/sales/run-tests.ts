@@ -29,7 +29,17 @@ import {
   exceedsDiscountLimit,
   parseDiscount,
 } from "./discount";
-import { cartFingerprint, resolveDiscountApproval } from "./discountApproval";
+import {
+  cartFingerprint,
+  resolveDiscountApproval,
+  verifyDiscountApproval,
+} from "./discountApproval";
+import {
+  findPriceFloorViolations,
+  needsAdminForFloor,
+  priceFloorMessage,
+  type FloorCost,
+} from "./priceFloor";
 import {
   defaultLowStockAt,
   warnIfNegativeStock,
@@ -471,6 +481,129 @@ test("POS-071: discount over the cashier limit needs approval; within it does no
   assert.equal(exceedsDiscountLimit(lineHeavy, "cashier"), true);
 });
 
+// POS-060..067: minimum selling price = cost × (1 + minMarginPct/100).
+// Product P: cost 60, margin 20% → floor 72; shelf price 100.
+const floorCosts = new Map<string, FloorCost>([
+  ["P", { costFifo: 60, minMarginPct: 20, sellPrice: 100 }],
+  ["OIL", { costFifo: 0.5, minMarginPct: 0, sellPrice: 2 }],
+  ["PKG", { costFifo: 1, minMarginPct: 0, sellPrice: 3 }],
+  ["FREE", { costFifo: 0, minMarginPct: 50, sellPrice: 10 }],
+  ["OIL40", { costFifo: 0.5, minMarginPct: 40, sellPrice: 2 }],
+  ["RMX", { costFifo: 0, minMarginPct: 10, sellPrice: 150 }],
+]);
+const readyLine = (qty = 1) => ({ productId: "P", name: "P", qty, unitLabel: "pcs", unitPrice: 100, lineType: "ready" as const });
+const readyNeed = (qty = 1, lineIndex = 0) => ({ productId: "P", productName: "P", qty, reason: "ready", lineIndex });
+function floorFor(discount?: unknown, invoice?: unknown, qty = 1) {
+  const validated = { lines: [readyLine(qty)], deductions: [readyNeed(qty)] };
+  return findPriceFloorViolations(
+    validated,
+    computeDiscounts([{ gross: 100 * qty, discount }], invoice),
+    floorCosts,
+  );
+}
+
+test("POS-060: above the minimum (no discount / small discount) → no violation", () => {
+  assert.deepEqual(floorFor(), []);
+  assert.deepEqual(floorFor({ type: "amount", value: 27.999 }), []);
+});
+
+test("POS-061: exactly at the minimum is allowed; one baisa below is not", () => {
+  assert.deepEqual(floorFor({ type: "amount", value: 28 }), []);
+  const below = floorFor({ type: "amount", value: 28.001 });
+  assert.equal(below.length, 1);
+  assert.equal(below[0].revenue, 71.999);
+  assert.equal(below[0].floor, 72);
+});
+
+test("POS-062: below the minimum → violation, incl. below cost and free", () => {
+  assert.equal(floorFor({ type: "percent", value: 40 })[0].revenue, 60);
+  assert.equal(floorFor({ type: "percent", value: 50 })[0].revenue, 50);
+  assert.equal(floorFor({ type: "percent", value: 100 })[0].revenue, 0);
+});
+
+test("POS-062: invoice discount counts toward the line's final price", () => {
+  assert.deepEqual(floorFor(undefined, { type: "amount", value: 28 }), []);
+  assert.equal(floorFor(undefined, { type: "percent", value: 30 }).length, 1);
+  // Line + invoice discounts together: 100 − 20 = 80, then −10% = 72 → at floor.
+  assert.deepEqual(floorFor({ type: "amount", value: 20 }, { type: "percent", value: 10 }), []);
+  assert.equal(floorFor({ type: "amount", value: 20 }, { type: "percent", value: 10.01 }).length, 1);
+});
+
+test("POS-062: floor scales with quantity", () => {
+  assert.deepEqual(floorFor({ type: "amount", value: 84 }, undefined, 3), []); // 216 = 3 × 72
+  assert.equal(floorFor({ type: "amount", value: 84.001 }, undefined, 3)[0].floor, 216);
+});
+
+test("price floor: a cheap line can't hide behind a high-margin line", () => {
+  const validated = {
+    lines: [readyLine(), { ...readyLine(), name: "P2" }],
+    deductions: [readyNeed(1, 0), readyNeed(1, 1)],
+  };
+  const v = findPriceFloorViolations(
+    validated,
+    computeDiscounts([{ gross: 100 }, { gross: 100, discount: { type: "percent", value: 50 } }]),
+    floorCosts,
+  );
+  assert.deepEqual(v.map((x) => x.lineIndex), [1]);
+});
+
+test("price floor: refill packaging charge counts as revenue; no cost → no floor", () => {
+  // 100 ml oil at cost 0.5 = 50 floor; line 40 + packaging 3 → 43 < 50.
+  const refill = {
+    lines: [{ productId: "OIL", name: "Oil refill", qty: 1, unitLabel: "100ml refill", unitPrice: 40, lineType: "refill" as const }],
+    deductions: [
+      { productId: "OIL", productName: "Oil", qty: 100, reason: "refill:oil", lineIndex: 0 },
+      { productId: "PKG", productName: "Cap", qty: 1, reason: "refill:packaging", lineIndex: 0 },
+    ],
+  };
+  const v = findPriceFloorViolations(refill, computeDiscounts([{ gross: 40 }], undefined, 3), floorCosts);
+  assert.equal(v[0].revenue, 43);
+  assert.equal(v[0].floor, 51);
+  const free = {
+    lines: [{ ...readyLine(), productId: "FREE", name: "Free" }],
+    deductions: [{ productId: "FREE", productName: "Free", qty: 1, reason: "ready", lineIndex: 0 }],
+  };
+  assert.deepEqual(
+    findPriceFloorViolations(free, computeDiscounts([{ gross: 0 }]), floorCosts),
+    [],
+  );
+});
+
+test("price floor: a remix uses the Remix product's margin, not each component's", () => {
+  // 20 ml oil (cost 0.5/ml, its own retail margin 40%) + 1 packaging (cost 1)
+  // → cost 11; Remix margin 10% → floor 12.1 (not 20 × 0.5 × 1.4 + 1 = 15).
+  const remixSale = (price: number) => ({
+    validated: {
+      lines: [{ productId: "RMX", name: "Remix", qty: 1, unitLabel: "pcs", unitPrice: price, lineType: "remix" as const }],
+      deductions: [
+        { productId: "OIL40", productName: "Oil", qty: 20, reason: "remix:oil", lineIndex: 0 },
+        { productId: "PKG", productName: "Bottle", qty: 1, reason: "remix:bottle", lineIndex: 0 },
+      ],
+    },
+    breakdown: computeDiscounts([{ gross: price }]),
+  });
+  const at = remixSale(12.1);
+  assert.deepEqual(findPriceFloorViolations(at.validated, at.breakdown, floorCosts), []);
+  const below = remixSale(12.099);
+  const v = findPriceFloorViolations(below.validated, below.breakdown, floorCosts);
+  assert.equal(v.length, 1);
+  assert.equal(v[0].floor, 12.1);
+  // Unknown line product → no margin, floor is plain cost.
+  const bare = remixSale(11);
+  bare.validated.lines[0].productId = "MISSING";
+  assert.deepEqual(findPriceFloorViolations(bare.validated, bare.breakdown, floorCosts), []);
+});
+
+test("price floor: only the Admin (owner) is exempt; message names the line", () => {
+  const v = floorFor({ type: "percent", value: 50 });
+  assert.equal(needsAdminForFloor(v, "owner"), false);
+  for (const role of ["manager", "branch_manager", "cashier", "accountant", undefined]) {
+    assert.equal(needsAdminForFloor(v, role), true);
+  }
+  assert.equal(needsAdminForFloor([], "cashier"), false);
+  assert.match(priceFloorMessage(v), /P would sell for 50\.000, below its minimum of 72\.000/);
+});
+
 async function expectSaleError(promise: Promise<unknown>, code: string) {
   await assert.rejects(promise, (err: unknown) => {
     assert.ok(err instanceof SaleError);
@@ -508,6 +641,35 @@ const asyncTests: Array<[string, () => Promise<void>]> = [
         await resolveDiscountApproval(computeDiscounts(discountCart), { role: "accountant" }, null),
         null,
       );
+    },
+  ],
+  [
+    "POS-062/065: below-minimum price without Admin credentials → PRICE_FLOOR_APPROVAL_REQUIRED",
+    async () => {
+      const breakdown = computeDiscounts(discountCart);
+      const floor = { message: "below minimum" };
+      // Applies even with no discount and to a manager whose discount limit is fine.
+      await expectSaleError(
+        resolveDiscountApproval(breakdown, { role: "manager" }, null, floor),
+        "PRICE_FLOOR_APPROVAL_REQUIRED",
+      );
+      await expectSaleError(
+        resolveDiscountApproval(breakdown, { role: "cashier" }, { email: "admin@x.com", password: "" }, floor),
+        "PRICE_FLOOR_APPROVAL_REQUIRED",
+      );
+    },
+  ],
+  [
+    "POS-066: checkout below minimum with no / blank approval token → PRICE_FLOOR_APPROVAL_REQUIRED",
+    async () => {
+      const breakdown = computeDiscounts(discountCart);
+      const floor = { message: "below minimum" };
+      for (const token of [undefined, ""]) {
+        await expectSaleError(
+          verifyDiscountApproval(token, breakdown, { userId: "u1", role: "cashier" }, "fp", floor),
+          "PRICE_FLOOR_APPROVAL_REQUIRED",
+        );
+      }
     },
   ],
 ];

@@ -21,6 +21,13 @@
  *                password check before the 8-attempt lockout engages.
  *  7. Login    — same lockout on /api/auth/login: parallel brute force,
  *                sequential countdown, success clears the counter.
+ *  8. Price floor (POS-060..067) — concurrent below-minimum checkouts with
+ *                no / forged tokens and manager approvals are all refused
+ *                with no stock moved; Admin-approved ones all succeed at the
+ *                approved price; changed carts, cross-cashier and reused
+ *                tokens are refused.
+ *  9. POS page — concurrent GET /pos at rising user counts (server render
+ *                only; no browser CPU / memory / JS errors).
  *
  * Same safety guard as the E2E suites: refuses unless DATABASE_URL is local
  * (E2E_ALLOW_REMOTE_DB=1 to override for a dedicated staging DB).
@@ -197,7 +204,30 @@ async function main() {
       currency: "OMR",
     })),
   );
-  const allProductIds = [...hot.map((p) => p._id), scarce._id];
+  // POS-060..067: thin margin — shelf 100, cost 95, so a 10% (cashier-limit)
+  // discount lands at 90, below the minimum, with no discount approval needed.
+  const FLOOR_STOCK = 10_000;
+  const floorProduct = await Product.create({
+    sku: `LOAD-F-${tag}`,
+    name: `Load LOAD-F-${tag}`,
+    category: "Perfume",
+    unit: "pcs",
+    sellPrice: 100,
+    costFifo: 95,
+    minMarginPct: 0,
+    stockSellable: FLOOR_STOCK,
+  });
+  await FifoLayer.create({
+    productId: floorProduct._id,
+    supplierId,
+    supplierName: "Load Supplier",
+    purchaseDate: new Date(Date.now() - 86_400_000),
+    qtyRemaining: FLOOR_STOCK,
+    originalQty: FLOOR_STOCK,
+    unitCost: 95,
+    currency: "OMR",
+  });
+  const allProductIds = [...hot.map((p) => p._id), scarce._id, floorProduct._id];
 
   const hadSettings = await AppSettings.exists({ key: "default" });
   if (!hadSettings) {
@@ -218,7 +248,15 @@ async function main() {
   const approverEmails = Array.from({ length: 5 }, (_, i) =>
     i === 0 ? ownerEmail : `load-owner${i}-${tag}@test.local`,
   );
+  const managerEmails = Array.from({ length: 5 }, (_, i) => `load-manager${i}-${tag}@test.local`);
   const users = await User.create([
+    ...managerEmails.map((email) => ({
+      name: "Load Manager",
+      email,
+      passwordHash: hashPassword(password),
+      role: "manager",
+      roleLabel: "Manager",
+    })),
     ...approverEmails.map((email) => ({
       name: "Load Owner",
       email,
@@ -231,22 +269,30 @@ async function main() {
     { name: "Login User", email: loginUserEmail, passwordHash: hashPassword(password), role: "cashier", roleLabel: "Cashier" },
   ]);
 
-  const cookie = `unich_session=${createSessionToken({
-    userId: "000000000000000000000099",
-    name: "Load Cashier",
-    email: "load-cashier@test.local",
-    role: "cashier",
-    roleLabel: "Cashier",
-    branchId: null,
-    branchName: null,
-  })}`;
+  const sessionCookie = (userId: string, name: string, role: "cashier" | "owner") =>
+    `unich_session=${createSessionToken({
+      userId,
+      name,
+      email: `${name.toLowerCase().replace(/\s+/g, "-")}@test.local`,
+      role,
+      roleLabel: role === "owner" ? "Owner" : "Cashier",
+      branchId: null,
+      branchName: null,
+    })}`;
+  const cookie = sessionCookie("000000000000000000000099", "Load Cashier", "cashier");
+  const cookieB = sessionCookie("000000000000000000000098", "Load Cashier B", "cashier");
+  const ownerCookie = sessionCookie("000000000000000000000097", "Load Admin", "owner");
 
-  async function post(body: Record<string, unknown>, path = "/api/sales"): Promise<Result> {
+  async function post(
+    body: Record<string, unknown>,
+    path = "/api/sales",
+    as = cookie,
+  ): Promise<Result> {
     const t = performance.now();
     try {
       const res = await fetch(`${BASE}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Cookie: cookie },
+        headers: { "Content-Type": "application/json", Cookie: as },
         body: JSON.stringify({ customerPhone: PHONE, payment: "cash", ...body }),
       });
       const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -575,6 +621,191 @@ async function main() {
       const again = await login(loginUserEmail, "nope-again");
       assert.equal(again.status, 401, "fresh window after success");
     });
+
+    console.log("\n8. Price floor (POS-060..067) — shelf 100, cost 95, cashier sells at 90");
+    const floorId = String(floorProduct._id);
+    const floorLines = (pct: number) => [
+      { productId: floorId, qty: 1, lineType: "ready", discount: { type: "percent", value: pct } },
+    ];
+    const floorStock = async () =>
+      (await Product.findById(floorProduct._id).lean<{ stockSellable: number }>())!.stockSellable;
+    const floorSales = () => Sale.countDocuments({ customerPhone: PHONE, "lines.productId": floorProduct._id });
+    const floorLayers = async () =>
+      (await FifoLayer.find({ productId: floorProduct._id }).lean<{ qtyRemaining: number }[]>()).reduce(
+        (a, l) => a + l.qtyRemaining,
+        0,
+      );
+
+    const above = await Promise.all(
+      Array.from({ length: 50 }, () => post({ lines: floorLines(4), idempotencyKey: randomUUID() })),
+    );
+    report.floorAbove = summarize("above min ×50", above, Math.max(...above.map((r) => r.ms)));
+    await check("POS-060: 50 concurrent sales above the minimum (96) → all 201, no prompt", () => {
+      const non = above.filter((r) => r.status !== 201);
+      assert.equal(non.length, 0, JSON.stringify(non.slice(0, 2).map((r) => r.body)));
+    });
+    const atMin = await post({ lines: floorLines(5), idempotencyKey: randomUUID() });
+    await check("POS-061: exactly at the minimum (95) → 201", () => {
+      assert.equal(atMin.status, 201, JSON.stringify(atMin.body));
+    });
+
+    const stock8 = await floorStock();
+    const sales8 = await floorSales();
+    const noToken = await Promise.all(
+      Array.from({ length: 50 }, () => post({ lines: floorLines(10), idempotencyKey: randomUUID() })),
+    );
+    report.floorBlocked = summarize("below min ×50", noToken, Math.max(...noToken.map((r) => r.ms)));
+    const forged = await Promise.all(
+      Array.from({ length: 50 }, (_, i) =>
+        post({
+          lines: [{ ...floorLines(10)[0], unitPrice: 100, approved: true }],
+          approved: true,
+          authorized: true,
+          priceApproved: true,
+          adminApproved: true,
+          role: "owner",
+          actor: { userId: "000000000000000000000097", role: "owner" },
+          discountApprovalToken: i % 2 ? "forged-token" : randomUUID(),
+          idempotencyKey: randomUUID(),
+        }),
+      ),
+    );
+    summarize("forged ×50", forged, Math.max(...forged.map((r) => r.ms)));
+    await check("POS-062/066: 100 concurrent below-minimum checkouts (no token / forged flags) → all 403, nothing written", async () => {
+      const all = [...noToken, ...forged];
+      const bad = all.filter((r) => r.status !== 403 || r.code !== "PRICE_FLOOR_APPROVAL_REQUIRED");
+      assert.equal(bad.length, 0, JSON.stringify(bad.slice(0, 2).map((r) => [r.status, r.body])));
+      assert.equal(await floorSales(), sales8, "sales written");
+      assert.equal(await floorStock(), stock8, "stock moved");
+      assert.equal(await floorLayers(), stock8, "FIFO layers moved");
+    });
+
+    const mgr = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        post(
+          { lines: floorLines(10), email: managerEmails[i % managerEmails.length], password },
+          "/api/sales/discount-approval",
+        ),
+      ),
+    );
+    summarize("manager approve ×20", mgr, Math.max(...mgr.map((r) => r.ms)));
+    await check("POS-063 (authz): 20 concurrent manager approvals of a below-minimum price → all 403", () => {
+      const bad = mgr.filter((r) => r.status !== 403 || !/Admin approval/.test(String(r.body.error)));
+      assert.equal(bad.length, 0, JSON.stringify(bad.slice(0, 2).map((r) => [r.status, r.body])));
+    });
+    const wrongPw = await post(
+      { lines: floorLines(10), email: approverEmails[4], password: "wrong-password" },
+      "/api/sales/discount-approval",
+    );
+    await check("POS-064: wrong Admin password → 403, no token", () => {
+      assert.equal(wrongPw.status, 403);
+      assert.equal(wrongPw.body.approvalToken, undefined);
+    });
+
+    const APPROVED = 30;
+    const stockA = await floorStock();
+    const approvedFloor = await Promise.all(
+      Array.from({ length: APPROVED }, async (_, i) => {
+        const t0 = performance.now();
+        const a = await post(
+          { lines: floorLines(10), email: approverEmails[i % approverEmails.length], password },
+          "/api/sales/discount-approval",
+        );
+        if (a.status !== 200) return a;
+        const r = await post({
+          lines: floorLines(10),
+          discountApprovalToken: a.body.approvalToken,
+          idempotencyKey: randomUUID(),
+        });
+        return { ...r, ms: performance.now() - t0 };
+      }),
+    );
+    report.floorApproved = summarize("admin approve ×30", approvedFloor, Math.max(...approvedFloor.map((r) => r.ms)));
+    await check(`POS-063: ${APPROVED} concurrent Admin-approved sales → all 201 at 90, Admin recorded, stock −${APPROVED}`, async () => {
+      const ok = approvedFloor.filter((r) => r.status === 201);
+      assert.equal(ok.length, APPROVED, JSON.stringify(approvedFloor.filter((r) => r.status !== 201).slice(0, 2).map((r) => r.body)));
+      const docs = await Sale.find({ _id: { $in: ok.map((r) => new mongoose.Types.ObjectId(String(r.body.id))) } })
+        .lean<{ total: number; discountApprovedBy?: { role: string }; inventoryDeductions: { costTotal: number }[] }[]>();
+      assert.equal(docs.length, APPROVED);
+      for (const d of docs) {
+        assert.equal(d.total, 90);
+        assert.equal(d.discountApprovedBy?.role, "owner");
+        // Financial integrity: revenue 90, FIFO cost 95 → gross profit −5.
+        assert.equal(d.inventoryDeductions.reduce((a, x) => a + x.costTotal, 0), 95);
+      }
+      assert.equal(stockA - (await floorStock()), APPROVED);
+      assert.equal(await floorLayers(), await floorStock());
+    });
+
+    const ownerSelf = await post({ lines: floorLines(10), idempotencyKey: randomUUID() }, "/api/sales", ownerCookie);
+    await check("Admin at the till sells below minimum without a prompt", () => {
+      assert.equal(ownerSelf.status, 201, JSON.stringify(ownerSelf.body));
+    });
+
+    const sales67 = await floorSales();
+    const changed = await Promise.all(
+      Array.from({ length: 20 }, async (_, i) => {
+        const a = await post(
+          { lines: floorLines(10), email: approverEmails[i % approverEmails.length], password },
+          "/api/sales/discount-approval",
+        );
+        return post({ lines: floorLines(10 - (i % 2 ? 0.5 : -0.5)), discountApprovalToken: a.body.approvalToken, idempotencyKey: randomUUID() });
+      }),
+    );
+    summarize("changed after ×20", changed, Math.max(...changed.map((r) => r.ms)));
+    await check("POS-067: 20 concurrent carts changed after Admin approval (9.5% / 10.5%) → all 403", async () => {
+      const bad = changed.filter((r) => r.status !== 403 || r.code !== "PRICE_FLOOR_APPROVAL_REQUIRED");
+      assert.equal(bad.length, 0, JSON.stringify(bad.slice(0, 2).map((r) => [r.status, r.body])));
+      assert.equal(await floorSales(), sales67);
+    });
+
+    const forA = await post(
+      { lines: floorLines(10), email: approverEmails[1], password },
+      "/api/sales/discount-approval",
+    );
+    const crossUser = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        post({ lines: floorLines(10), discountApprovalToken: forA.body.approvalToken, idempotencyKey: randomUUID() }, "/api/sales", cookieB),
+      ),
+    );
+    await check("concurrency: cashier A's Admin token used ×10 by cashier B → all 403", async () => {
+      assert.equal(crossUser.filter((r) => r.status !== 403).length, 0);
+      assert.equal(await floorSales(), sales67);
+    });
+    const reuse = await Promise.all(
+      Array.from({ length: 15 }, () =>
+        post({ lines: floorLines(10), discountApprovalToken: forA.body.approvalToken, idempotencyKey: randomUUID() }),
+      ),
+    );
+    summarize("1 admin token ×15", reuse, Math.max(...reuse.map((r) => r.ms)));
+    await check("duplicate: one Admin token fired 15× concurrently → exactly one sale", async () => {
+      assert.equal(reuse.filter((r) => r.status === 201).length, 1);
+      assert.equal((await floorSales()) - sales67, 1);
+    });
+
+    console.log("\n9. POS page — concurrent GET /pos (server render only)");
+    const pageLoad: unknown[] = [];
+    for (const users of [1, 5, 10, 25, 50, 100]) {
+      const results: Result[] = [];
+      const t = performance.now();
+      await Promise.all(
+        Array.from({ length: users }, async () => {
+          const t1 = performance.now();
+          try {
+            const res = await fetch(`${BASE}/pos`, { headers: { Cookie: cookie } });
+            await res.text();
+            results.push({ status: res.status, ms: performance.now() - t1, body: {} });
+          } catch (err) {
+            results.push({ status: 0, ms: performance.now() - t1, code: "NETWORK", body: { error: String(err) } });
+          }
+        }),
+      );
+      pageLoad.push(summarize(`GET /pos ×${users}`, results, performance.now() - t));
+      await check(`page ${users}: no 5xx / network errors`, () => {
+        assert.equal(results.filter((r) => r.status === 0 || r.status >= 500).length, 0);
+      });
+    }
+    report.pageLoad = pageLoad;
   } finally {
     await stopServer(server);
     await Sale.deleteMany({ customerPhone: PHONE });
@@ -585,7 +816,9 @@ async function main() {
     await User.deleteMany({ _id: { $in: users.map((u: { _id: unknown }) => u._id) } });
     await RateLimit.deleteMany({
       key: {
-        $in: [...approverEmails, victimEmail, loginVictimEmail, loginUserEmail].map((e) => `email:${e}`),
+        $in: [...approverEmails, ...managerEmails, victimEmail, loginVictimEmail, loginUserEmail].map(
+          (e) => `email:${e}`,
+        ),
       },
     });
     if (!hadSettings) await AppSettings.deleteOne({ key: "default" });

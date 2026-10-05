@@ -99,6 +99,8 @@ export async function buildSaleReport(opts: {
   period: ReportPeriod;
   anchor: Date;
   limit?: number;
+  /** Branch isolation (auth/guards branchScopeFilter) — null = every branch. */
+  branchFilter?: Record<string, unknown> | null;
 }): Promise<SaleReportResult> {
   const { start, end } = getPeriodRange(opts.period, opts.anchor);
   const limit = Math.min(Math.max(opts.limit ?? 500, 1), 2000);
@@ -106,6 +108,7 @@ export async function buildSaleReport(opts: {
   const docs = await Sale.find({
     status: opts.status,
     createdAt: { $gte: start, $lte: end },
+    ...(opts.branchFilter ? { $and: [opts.branchFilter] } : {}),
   })
     .sort({ createdAt: -1 })
     .limit(limit)

@@ -59,9 +59,17 @@ export function formatPaymentLabel(
   return parts.length > 0 ? `Mixed (${parts.join(" + ")})` : payment;
 }
 
+/** ISO 4217 minor units: Gulf dinars/rials (OMR, BHD, KWD, …) use 3 decimals (baisa/fils). */
+const THREE_DECIMAL_CURRENCIES = new Set(["OMR", "BHD", "KWD", "JOD", "TND", "LYD", "IQD"]);
+
+export function currencyDecimals(currency: string): number {
+  return THREE_DECIMAL_CURRENCIES.has(String(currency || "").toUpperCase()) ? 3 : 2;
+}
+
+/** Amounts print with the currency's own decimals — an OMR sale of 6.892 prints 6.892. */
 export function money(amount: number, currency: string): string {
   const value = Number.isFinite(amount) ? amount : 0;
-  return `${currency} ${value.toFixed(2)}`;
+  return `${currency} ${value.toFixed(currencyDecimals(currency))}`;
 }
 
 export function lineTotal(line: ReceiptLine): number {
@@ -95,7 +103,8 @@ export function buildReceiptDoc(input: {
   // rather than added on top — the printed total always equals the recorded sale total.
   const vatPercent = Math.max(0, Number(input.settings?.vatPercent ?? 0));
   const net = vatPercent > 0 ? gross / (1 + vatPercent / 100) : gross;
-  const vatAmount = round2(gross - net);
+  const round = (value: number) => roundTo(value, currencyDecimals(store.currency));
+  const vatAmount = round(gross - net);
 
   return {
     receiptNo: receiptNumberFor(input.saleId || "", issuedAt),
@@ -111,14 +120,15 @@ export function buildReceiptDoc(input: {
     salesperson: input.salesperson?.trim() || "",
     payment: input.payment?.trim() || "cash",
     lines,
-    subtotal: round2(gross - vatAmount),
+    subtotal: round(gross - vatAmount),
     vatPercent,
     vatAmount,
-    discountTotal: round2(Math.max(0, Number(input.discountTotal ?? 0) || 0)),
-    total: round2(gross),
+    discountTotal: round(Math.max(0, Number(input.discountTotal ?? 0) || 0)),
+    total: round(gross),
   };
 }
 
-function round2(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
+function roundTo(value: number, decimals: number): number {
+  const f = 10 ** decimals;
+  return Math.round((value + Number.EPSILON) * f) / f;
 }

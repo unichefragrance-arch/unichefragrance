@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Sale } from "@/lib/models";
@@ -55,9 +56,9 @@ registerReport({
         const grossProfit = revenue - cost;
         return {
           date,
-          revenue: Math.round(revenue * 100) / 100,
-          cost: Math.round(cost * 100) / 100,
-          grossProfit: Math.round(grossProfit * 100) / 100,
+          revenue: roundMoney(revenue),
+          cost: roundMoney(cost),
+          grossProfit: roundMoney(grossProfit),
           marginPct: revenue > 0 ? Math.round((grossProfit / revenue) * 10000) / 100 : 0,
         };
       });
@@ -69,9 +70,9 @@ registerReport({
     return {
       rows,
       totals: {
-        revenue: Math.round(revenue * 100) / 100,
-        cost: Math.round(cost * 100) / 100,
-        grossProfit: Math.round(grossProfit * 100) / 100,
+        revenue: roundMoney(revenue),
+        cost: roundMoney(cost),
+        grossProfit: roundMoney(grossProfit),
         marginPct: revenue > 0 ? Math.round((grossProfit / revenue) * 10000) / 100 : 0,
       },
     };

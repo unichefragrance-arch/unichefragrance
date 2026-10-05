@@ -1,14 +1,18 @@
 "use client";
 
 import { Suspense, useMemo, useState } from "react";
-import { Download, FileText, PauseCircle } from "lucide-react";
+import { Download, FileText, PauseCircle, Printer } from "lucide-react";
+import { useAuth } from "@/components/auth/AuthProvider";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ErrorState, LoadingState, useApiData } from "@/components/ui/DataState";
 import { EmptyState, PageHeader } from "@/components/ui/PageHeader";
 import { Panel, PanelHeader } from "@/components/ui/Panel";
 import { Stat } from "@/components/ui/Stat";
+import { hasPermission } from "@/lib/auth/roles";
 import { formatDate, formatMoney } from "@/lib/format";
+import { printSaleReceipt } from "@/lib/receipt/print";
+import type { AppSettings } from "@/lib/types";
 import {
   REPORT_PERIODS,
   toDateInputValue,
@@ -47,6 +51,31 @@ export default function ReportsPage() {
   );
 
   const completed = useApiData<SaleReportResult>(completedUrl);
+  // POS-119: reprint any completed sale from history — rendered by the server
+  // from the stored sale (receipt route needs POS access).
+  const { user } = useAuth();
+  const canReprint = Boolean(user && hasPermission(user.role, "pos:read"));
+  const receiptSettings = useApiData<AppSettings>(canReprint ? "/api/settings" : null);
+  const [reprintingId, setReprintingId] = useState<string | null>(null);
+  const [reprintError, setReprintError] = useState<string | null>(null);
+  async function reprint(saleId: string) {
+    setReprintingId(saleId);
+    setReprintError(null);
+    try {
+      const format = receiptSettings.data?.receiptFormat === "a4" ? "a4" : "thermal";
+      await printSaleReceipt(saleId, format, { reprint: true });
+      void fetch("/api/notifications/log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ channel: "print", kind: "receipt", status: "printed", saleId, format }),
+      }).catch(() => undefined);
+    } catch (err) {
+      setReprintError(err instanceof Error ? err.message : "Could not reprint receipt");
+    } finally {
+      setReprintingId(null);
+    }
+  }
   const held = useApiData<SaleReportResult>(heldUrl);
 
   async function exportReport(
@@ -92,8 +121,10 @@ export default function ReportsPage() {
           onDateChange={setCompletedDate}
           report={completed.data}
           loading={completed.loading}
-          error={completed.error}
+          error={completed.error ?? reprintError}
           onRetry={() => void completed.reload()}
+          onReprint={canReprint ? (id) => void reprint(id) : undefined}
+          reprintingId={reprintingId}
           exporting={exporting === "completed"}
           onExport={() =>
             void exportReport("completed", completedPeriod, completedDate)
@@ -140,6 +171,8 @@ function SaleReportSection({
   onRetry,
   exporting,
   onExport,
+  onReprint,
+  reprintingId,
 }: {
   title: string;
   subtitle: string;
@@ -155,6 +188,8 @@ function SaleReportSection({
   onRetry: () => void;
   exporting: boolean;
   onExport: () => void;
+  onReprint?: (saleId: string) => void;
+  reprintingId?: string | null;
 }) {
   const summary = report?.summary;
   const paymentMix = summary
@@ -279,6 +314,7 @@ function SaleReportSection({
                       <th className="px-3 py-2.5 font-medium">Type</th>
                       <th className="px-3 py-2.5 font-medium">Payment</th>
                       <th className="px-4 py-2.5 text-right font-medium">Total</th>
+                      {onReprint ? <th className="px-3 py-2.5" aria-label="Receipt" /> : null}
                     </tr>
                   </thead>
                   <tbody>
@@ -308,6 +344,20 @@ function SaleReportSection({
                         <td className="px-4 py-3 text-right font-medium">
                           {formatMoney(sale.total)}
                         </td>
+                        {onReprint ? (
+                          <td className="px-3 py-3 text-right">
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              disabled={reprintingId === sale.id}
+                              onClick={() => onReprint(sale.id)}
+                              title="Reprint receipt"
+                            >
+                              <Printer className="h-3.5 w-3.5" />
+                              {reprintingId === sale.id ? "Printing…" : "Reprint"}
+                            </Button>
+                          </td>
+                        ) : null}
                       </tr>
                     ))}
                   </tbody>

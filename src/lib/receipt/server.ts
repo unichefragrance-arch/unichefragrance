@@ -59,12 +59,18 @@ export async function receiptDocForSale(
   await connectDB();
   const sale = await Sale.findById(saleId)
     .select(
-      "createdAt status customerName customerPhone salesperson payment paymentBreakdown lines total discountTotal",
+      "createdAt status customerName customerPhone salesperson payment paymentBreakdown lines total discountTotal vatPercent",
     )
     .lean<Record<string, unknown>>();
   if (!sale) return null;
 
-  const settings = options?.settings ?? (await loadReceiptSettings());
+  const storeSettings = options?.settings ?? (await loadReceiptSettings());
+  // A converted quotation carries its own VAT rate (added on top of its
+  // prices); split the total with that rate, not the store default.
+  const settings =
+    typeof sale.vatPercent === "number"
+      ? { ...storeSettings, vatPercent: sale.vatPercent }
+      : storeSettings;
   const lines = Array.isArray(sale.lines)
     ? (sale.lines as Record<string, unknown>[]).map(
         (line): ReceiptLine => ({

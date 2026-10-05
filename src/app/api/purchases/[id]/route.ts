@@ -1,3 +1,4 @@
+import { roundMoney } from "@/lib/money";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import { PurchaseOrder } from "@/lib/models";
@@ -139,8 +140,8 @@ export async function PUT(req: Request, ctx: Ctx) {
     // Recompute VAT + total whenever subtotal or vatPercent could have changed;
     // otherwise allow a direct total override (e.g. manual correction with no line/VAT edits).
     if (Array.isArray(body.lines) || body.vatPercent !== undefined || body.subtotal !== undefined) {
-      purchase.vatAmount = Math.round(purchase.subtotal * (purchase.vatPercent / 100) * 100) / 100;
-      purchase.total = Math.round((purchase.subtotal + purchase.vatAmount) * 100) / 100;
+      purchase.vatAmount = roundMoney(purchase.subtotal * (purchase.vatPercent / 100));
+      purchase.total = roundMoney(purchase.subtotal + purchase.vatAmount);
     } else if (body.total !== undefined) {
       purchase.total = Number(body.total);
     }
