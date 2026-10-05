@@ -42,6 +42,8 @@ export type DeductionAuditEntry = {
   costTotal: number;
 };
 
+export type PaymentSplitInput = { method: string; amount: number };
+
 export type CreateSaleInput = {
   customerPhone: string;
   customerName?: string;
@@ -49,6 +51,8 @@ export type CreateSaleInput = {
   customerId?: string;
   salesperson?: string;
   payment: string;
+  /** Required when payment === "mixed" — per-method amounts that must sum to the total. */
+  paymentBreakdown?: PaymentSplitInput[];
   lines: IncomingSaleLine[];
   /** POS-070: `{ type: "percent" | "amount", value }` on the bill after line discounts. */
   invoiceDiscount?: unknown;
@@ -276,6 +280,62 @@ function normalizePayment(value: string): string {
   return "cash";
 }
 
+const SPLIT_METHODS = new Set(["cash", "card", "bank", "credit"]);
+
+/**
+ * Validates and normalizes a mixed-payment breakdown against the sale total.
+ * Held bills (whose total may still change) skip the sum check.
+ */
+function normalizePaymentBreakdown(
+  payment: string,
+  breakdown: PaymentSplitInput[] | undefined,
+  total: number,
+  requireBalanced: boolean,
+): { method: string; amount: number }[] {
+  if (payment !== "mixed") return [];
+  if (!Array.isArray(breakdown) || breakdown.length === 0) {
+    throw new SaleError("VALIDATION", "Mixed payment needs a breakdown of amounts");
+  }
+  const byMethod = new Map<string, number>();
+  for (const entry of breakdown) {
+    const method = (entry.method || "").toLowerCase();
+    if (!SPLIT_METHODS.has(method)) {
+      throw new SaleError("VALIDATION", `Invalid payment method in breakdown: ${entry.method}`);
+    }
+    const amount = Number(entry.amount);
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new SaleError("VALIDATION", `Invalid amount for ${method} in breakdown`);
+    }
+    if (amount === 0) continue;
+    byMethod.set(method, (byMethod.get(method) || 0) + amount);
+  }
+  const normalized = [...byMethod.entries()].map(([method, amount]) => ({
+    method,
+    amount: Math.round(amount * 1000) / 1000,
+  }));
+  if (normalized.length === 0) {
+    throw new SaleError("VALIDATION", "Mixed payment needs at least one method with an amount");
+  }
+  if (requireBalanced) {
+    const sum = normalized.reduce((s, e) => s + e.amount, 0);
+    if (Math.abs(sum - total) > 0.01) {
+      throw new SaleError(
+        "VALIDATION",
+        `Mixed payment amounts (${sum.toFixed(3)}) don't match the total (${total.toFixed(3)})`,
+      );
+    }
+  }
+  return normalized;
+}
+
+function creditPortion(payment: string, subtotal: number, breakdown: { method: string; amount: number }[]) {
+  if (payment === "credit") return subtotal;
+  if (payment === "mixed") {
+    return breakdown.find((e) => e.method === "credit")?.amount || 0;
+  }
+  return 0;
+}
+
 function asObjectId(id?: string) {
   if (id && mongoose.isValidObjectId(id)) {
     return new mongoose.Types.ObjectId(id);
@@ -453,6 +513,9 @@ async function holdSale(input: CreateSaleInput) {
     });
   }
 
+  const payment = normalizePayment(input.payment);
+  // Held total may still change once resumed, so the split doesn't need to balance yet.
+  const paymentBreakdown = normalizePaymentBreakdown(payment, input.paymentBreakdown, subtotal, false);
   const displayName = givenName || "Walk-in Customer";
   const now = new Date();
   const _id = new mongoose.Types.ObjectId();
@@ -462,7 +525,8 @@ async function holdSale(input: CreateSaleInput) {
     customerName: displayName,
     customerId,
     salesperson,
-    payment: normalizePayment(input.payment),
+    payment,
+    ...(paymentBreakdown.length > 0 ? { paymentBreakdown } : {}),
     status: "held" as const,
     lines: linesForInsert(lines, breakdown),
     ...discountFields(breakdown),
@@ -545,6 +609,14 @@ export async function createSale(input: CreateSaleInput) {
         cartFingerprint(input.lines, input.invoiceDiscount),
       )
     : null;
+  // Mixed payment must cover the amount actually charged — after discounts.
+  const paymentBreakdown = normalizePaymentBreakdown(
+    payment,
+    input.paymentBreakdown,
+    breakdown.total,
+    true,
+  );
+  const creditAmount = creditPortion(payment, breakdown.total, paymentBreakdown);
   const tValidate = Date.now();
 
   const productNames = productNamesFromLines(validated.lines);
@@ -555,7 +627,7 @@ export async function createSale(input: CreateSaleInput) {
     },
     $inc: {
       totalPurchases: breakdown.total,
-      ...(payment === "credit" ? { creditBalance: breakdown.total } : {}),
+      ...(creditAmount > 0 ? { creditBalance: creditAmount } : {}),
     },
     // CRM-02/CRM-12: what they bought becomes "Products Requested" automatically.
     ...(productNames.length > 0
@@ -610,6 +682,7 @@ export async function createSale(input: CreateSaleInput) {
           customerId: customerObjectId,
           salesperson,
           payment,
+          ...(paymentBreakdown.length > 0 ? { paymentBreakdown } : {}),
           status,
           lines: linesForInsert(validated.lines, breakdown),
           ...discountFields(breakdown),

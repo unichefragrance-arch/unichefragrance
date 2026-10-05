@@ -67,6 +67,12 @@ export type ImportBatchStatus = "staged" | "committed" | "undone";
 
 export type PaymentMethod = "cash" | "card" | "bank" | "credit" | "mixed";
 
+/** One slice of a "mixed" payment — e.g. part cash, part credit. */
+export type PaymentSplit = {
+  method: Exclude<PaymentMethod, "mixed">;
+  amount: number;
+};
+
 export type QuotationStatus =
   | "draft"
   | "sent"

@@ -620,6 +620,32 @@ async function main() {
       assert.deepEqual(rev, { "Blue Ocean": 10400 }, "both products share the name 'Blue Ocean'");
     });
 
+    await test("mixed payment split must add up to the DISCOUNTED total; credit part goes to balance", async () => {
+      const lines = [{ productId: idA, qty: 1, lineType: "ready", discount: { type: "percent", value: 10 } }];
+      // 5000 − 10% = 4500
+      const before = { stock: await stockOf(), sales: await salesCount() };
+      const gross = await sell(lines, {
+        payment: "mixed",
+        paymentBreakdown: [{ method: "cash", amount: 3000 }, { method: "credit", amount: 2000 }],
+      });
+      assert.equal(gross.status, 400, "split of the pre-discount 5000 is rejected");
+      assert.deepEqual({ stock: await stockOf(), sales: await salesCount() }, before);
+      const credit0 = (await Customer.findOne({ phone: PHONE }).lean<{ creditBalance?: number }>())?.creditBalance ?? 0;
+      const ok = await sell(lines, {
+        payment: "mixed",
+        paymentBreakdown: [{ method: "cash", amount: 3000 }, { method: "credit", amount: 1500 }],
+      });
+      assert.equal(ok.status, 201, JSON.stringify(ok.body));
+      assert.equal(ok.body.total, 4500);
+      const sale = await Sale.findById(ok.body.id).lean<{ paymentBreakdown: { method: string; amount: number }[] }>();
+      assert.deepEqual(
+        sale!.paymentBreakdown.map((p) => [p.method, p.amount]),
+        [["cash", 3000], ["credit", 1500]],
+      );
+      const credit1 = (await Customer.findOne({ phone: PHONE }).lean<{ creditBalance?: number }>())!.creditBalance ?? 0;
+      assert.equal(credit1 - credit0, 1500, "only the credit part is added to the balance");
+    });
+
     await test("POS-075: negative / >100% / over-amount / non-numeric discounts → 400", async () => {
       const before = { stock: await stockOf(), sales: await salesCount() };
       const bad: Array<[Record<string, unknown>, Record<string, unknown>]> = [

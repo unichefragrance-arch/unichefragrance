@@ -1,6 +1,6 @@
 import { connectDB } from "@/lib/db";
 import { AppSettings, Sale } from "@/lib/models";
-import { buildReceiptDoc, type ReceiptSettingsInput } from "./document";
+import { buildReceiptDoc, formatPaymentLabel, type ReceiptSettingsInput } from "./document";
 import type { ReceiptDoc, ReceiptFormat, ReceiptLine } from "./types";
 
 export type ReceiptSettings = ReceiptSettingsInput & {
@@ -59,7 +59,7 @@ export async function receiptDocForSale(
   await connectDB();
   const sale = await Sale.findById(saleId)
     .select(
-      "createdAt status customerName customerPhone salesperson payment lines total discountTotal",
+      "createdAt status customerName customerPhone salesperson payment paymentBreakdown lines total discountTotal",
     )
     .lean<Record<string, unknown>>();
   if (!sale) return null;
@@ -86,7 +86,15 @@ export async function receiptDocForSale(
       phone: str(sale.customerPhone),
     },
     salesperson: str(sale.salesperson),
-    payment: str(sale.payment) || "cash",
+    payment: formatPaymentLabel(
+      str(sale.payment) || "cash",
+      Array.isArray(sale.paymentBreakdown)
+        ? (sale.paymentBreakdown as Record<string, unknown>[]).map((b) => ({
+            method: str(b.method),
+            amount: Number(b.amount ?? 0),
+          }))
+        : undefined,
+    ),
     lines,
     total: Number(sale.total ?? 0),
     discountTotal: Number(sale.discountTotal ?? 0),

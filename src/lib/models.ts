@@ -466,6 +466,14 @@ const SaleSchema = new Schema(
       enum: ["cash", "card", "bank", "credit", "mixed"],
       required: true,
     },
+    /** Only set when payment === "mixed" — how the total splits across methods. */
+    paymentBreakdown: [
+      {
+        _id: false,
+        method: { type: String, enum: ["cash", "card", "bank", "credit"], required: true },
+        amount: { type: Number, required: true },
+      },
+    ],
     status: {
       type: String,
       enum: ["completed", "held", "void"],

@@ -1,3 +1,4 @@
+import { formatMoney } from "@/lib/format";
 import type {
   ReceiptCustomer,
   ReceiptDoc,
@@ -44,6 +45,18 @@ export function receiptNumberFor(saleId: string, issuedAt: Date): string {
   ].join("");
   const suffix = saleId.replace(/[^a-z0-9]/gi, "").slice(-6).toUpperCase();
   return `INV-${day}-${suffix || "DRAFT"}`;
+}
+
+/** "mixed" + a per-method split becomes "Mixed (Cash OMR 5.000 + Credit OMR 5.000)" on receipts. */
+export function formatPaymentLabel(
+  payment: string,
+  breakdown?: { method: string; amount: number }[],
+): string {
+  if (payment !== "mixed" || !breakdown || breakdown.length === 0) return payment;
+  const parts = breakdown
+    .filter((e) => e.amount > 0)
+    .map((e) => `${e.method.charAt(0).toUpperCase()}${e.method.slice(1)} ${formatMoney(e.amount)}`);
+  return parts.length > 0 ? `Mixed (${parts.join(" + ")})` : payment;
 }
 
 export function money(amount: number, currency: string): string {
