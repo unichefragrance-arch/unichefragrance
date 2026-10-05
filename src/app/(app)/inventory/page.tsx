@@ -234,33 +234,42 @@ export default function InventoryPage() {
 
   async function saveStock() {
     if (!selectedProduct) return;
+    // INV-06: stock can't be set below zero — warn and stop (a FIFO layer
+    // can't hold negative stock; record wastage/adjustment or restock instead).
     if (selectedProduct.stockSellable < 0) {
-      const ok = window.confirm(
-        `Stock warning: ${selectedProduct.name} sellable would be ${selectedProduct.stockSellable}. Negative stock is permitted with warning — admin should restock or reorder. Save anyway?`,
+      flash(
+        `Stock warning: ${selectedProduct.name} sellable would be ${selectedProduct.stockSellable}. Stock can't go below zero — admin should restock or reorder.`,
+        7000,
       );
-      if (!ok) return;
+      return;
     }
     setSaving(true);
     try {
-      const res = await api<{ warnings?: string[] }>(
-        `/api/products/${selectedProduct.id}`,
-        {
-          method: "PUT",
-          body: JSON.stringify({
-            stockSellable: selectedProduct.stockSellable,
-            stockTester: selectedProduct.stockTester,
-            stockSample: selectedProduct.stockSample,
-            stockPersonal: selectedProduct.stockPersonal,
-            lowStockAt: selectedProduct.lowStockAt,
-          }),
-        },
-      );
+      // A changed sellable figure is booked server-side as a FIFO adjustment.
+      const res = await api<{
+        warnings?: string[];
+        stockAdjustment?: { delta: number };
+      }>(`/api/products/${selectedProduct.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          stockSellable: selectedProduct.stockSellable,
+          stockTester: selectedProduct.stockTester,
+          stockSample: selectedProduct.stockSample,
+          stockPersonal: selectedProduct.stockPersonal,
+          lowStockAt: selectedProduct.lowStockAt,
+        }),
+      });
       await reload();
       if (res.warnings && res.warnings.length > 0) {
         flash(res.warnings[0]);
+      } else if (res.stockAdjustment) {
+        const d = res.stockAdjustment.delta;
+        flash(`Stock saved · adjustment ${d > 0 ? "+" : ""}${d} recorded`);
       } else {
         flash("Stock saved");
       }
+    } catch (err) {
+      flash(err instanceof Error ? err.message : "Could not save stock", 7000);
     } finally {
       setSaving(false);
     }

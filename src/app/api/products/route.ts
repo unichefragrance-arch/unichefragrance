@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import { defaultLowStockAt } from "@/lib/inventory/stockCheck";
+import { setSellableStock, StockAdjustmentError } from "@/lib/inventory/stockAdjustment";
 import { Product } from "@/lib/models";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
@@ -60,7 +61,33 @@ export async function POST(req: Request) {
         name: body.name,
       });
     }
-    const product = await Product.create(body);
+    // Opening stock is booked as a FIFO layer at the given cost — never a bare
+    // number — so stockSellable always equals the FIFO total.
+    const { stockSellable: opening, costFifo, ...rest } = body as Record<string, unknown>;
+    const openingQty = Number(opening) || 0;
+    if (openingQty < 0) {
+      return NextResponse.json({ error: "Opening stock can't be negative" }, { status: 400 });
+    }
+    const created = await Product.create({ ...rest, stockSellable: 0, costFifo: Number(costFifo) || 0 });
+    if (openingQty > 0) {
+      try {
+        await setSellableStock({
+          product: created.toObject(),
+          target: openingQty,
+          createdBy: access?.name,
+          branchId: access?.branchId,
+          branchName: access?.branchName,
+          notes: "Opening stock",
+        });
+      } catch (err) {
+        await Product.deleteOne({ _id: created._id });
+        if (err instanceof StockAdjustmentError) {
+          return NextResponse.json({ error: err.message }, { status: 400 });
+        }
+        throw err;
+      }
+    }
+    const product = (await Product.findById(created._id)) ?? created;
     return NextResponse.json(toJSON(product), { status: 201 });
   } catch (error) {
     return NextResponse.json(

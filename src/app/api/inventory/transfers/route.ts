@@ -1,8 +1,16 @@
 import { NextResponse } from "next/server";
 import mongoose from "mongoose";
 import { connectDB } from "@/lib/db";
+import { addFifoLayer, deductFifoMany } from "@/lib/inventory";
 import { warnIfNegativeStock } from "@/lib/inventory/stockCheck";
+import {
+  ADJUSTMENT_SUPPLIER,
+  adjustmentSupplierId,
+  assertQtyFitsUnit,
+  StockAdjustmentError,
+} from "@/lib/inventory/stockAdjustment";
 import { Product } from "@/lib/models";
+import { SaleError } from "@/lib/sales/errors";
 import { toJSON } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
@@ -102,9 +110,56 @@ export async function POST(req: Request) {
       );
     }
 
-    product.set(from, fromQty - qty);
-    product.set(to, (Number(product.get(to)) || 0) + qty);
-    await product.save();
+    try {
+      assertQtyFitsUnit(qty, product.unit, "qty");
+    } catch (err) {
+      if (err instanceof StockAdjustmentError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
+
+    // Sellable stock is FIFO-backed: moving units out of it consumes layers,
+    // moving units into it adds a layer at the current FIFO cost — so
+    // stockSellable always equals the FIFO total. Every write is atomic
+    // (was read-modify-write, which could lose a concurrent sale).
+    const insufficient = () =>
+      NextResponse.json(
+        {
+          error: `Insufficient ${from} for ${product.name} (need ${qty})`,
+          code: "INSUFFICIENT_STOCK",
+        },
+        { status: 400 },
+      );
+    if (from === "stockSellable") {
+      try {
+        await deductFifoMany([{ productId, qty, productName: product.name }]);
+      } catch (err) {
+        if (err instanceof SaleError) return insufficient();
+        throw err;
+      }
+      await Product.updateOne({ _id: product._id }, { $inc: { [to]: qty } });
+    } else {
+      const taken = await Product.updateOne(
+        { _id: product._id, [from]: { $gte: qty } },
+        { $inc: { [from]: -qty } },
+      );
+      if (taken.modifiedCount === 0) return insufficient();
+      if (to === "stockSellable") {
+        await addFifoLayer({
+          productId,
+          supplierId: await adjustmentSupplierId(),
+          supplierName: ADJUSTMENT_SUPPLIER,
+          purchaseDate: new Date(),
+          qty,
+          unitCost: Number(product.costFifo) || 0,
+          currency: "OMR",
+        });
+      } else {
+        await Product.updateOne({ _id: product._id }, { $inc: { [to]: qty } });
+      }
+    }
+    const saved = await Product.findById(product._id);
 
     return NextResponse.json({
       ok: true,
@@ -112,7 +167,7 @@ export async function POST(req: Request) {
       to,
       qty,
       warnings,
-      product: toJSON(product),
+      product: toJSON(saved ?? product),
     });
   } catch (error) {
     return NextResponse.json(

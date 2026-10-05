@@ -27,6 +27,7 @@ const SUITES = [
   "returns",
   "customer-edit",
   "report-rounding",
+  "inventory",
 ];
 
 assertLocalDb();

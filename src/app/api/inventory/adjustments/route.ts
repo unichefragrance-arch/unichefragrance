@@ -11,15 +11,20 @@ import {
   Expense,
   InventoryAdjustment,
   Product,
-  Supplier,
 } from "@/lib/models";
 import { createSale } from "@/lib/sales/createSale";
 import { SaleError } from "@/lib/sales/errors";
 import { toJSON } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { recordAudit } from "@/lib/audit/log";
+import {
+  ADJUSTMENT_SUPPLIER,
+  adjustmentSupplierId,
+  assertQtyFitsUnit,
+  StockAdjustmentError,
+} from "@/lib/inventory/stockAdjustment";
 
-const ADJUSTMENT_SUPPLIER = "Stock Adjustment";
+
 
 type AdjustmentReason =
   | "wastage_cost"
@@ -74,7 +79,8 @@ export async function POST(req: Request) {
       direction === "in" ? "in" : "out",
     );
     const notes = body.notes ? String(body.notes).trim() : "";
-    const createdBy = body.createdBy ? String(body.createdBy) : undefined;
+    // Who did it comes from the session — never from the request body.
+    const createdBy = access?.name || undefined;
 
     if (!mongoose.isValidObjectId(productId)) {
       return NextResponse.json({ error: "Valid productId required" }, { status: 400 });
@@ -113,6 +119,15 @@ export async function POST(req: Request) {
     }>();
     if (!product) {
       return NextResponse.json({ error: "Product not found" }, { status: 404 });
+    }
+    // Pieces are whole units (a sale can't sell half a bottle either).
+    try {
+      assertQtyFitsUnit(qty, product.unit, "qty");
+    } catch (err) {
+      if (err instanceof StockAdjustmentError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
     }
 
     // ——— INV-07: customer leaked/damaged → replace + customer pays (sale) ———
@@ -339,17 +354,7 @@ export async function POST(req: Request) {
     }
 
     // direction === "in" — admin restock via adjustment layer
-    let supplier = await Supplier.findOne({ name: ADJUSTMENT_SUPPLIER });
-    if (!supplier) {
-      supplier = await Supplier.create({
-        name: ADJUSTMENT_SUPPLIER,
-        phone: "internal",
-        currency: "OMR",
-        creditLimit: 0,
-        outstanding: 0,
-        avgLeadDays: 0,
-      });
-    }
+    const supplierId = await adjustmentSupplierId();
 
     const stockBefore = Number(product.stockSellable) || 0;
     const stockAfter = stockBefore + qty;
@@ -357,7 +362,7 @@ export async function POST(req: Request) {
     const unitCost = Number(body.unitCost);
     const layer = await addFifoLayer({
       productId,
-      supplierId: String(supplier._id),
+      supplierId,
       supplierName: ADJUSTMENT_SUPPLIER,
       purchaseDate: new Date(),
       qty,
