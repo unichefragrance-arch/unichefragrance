@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import type { ExcelProductRow } from "@/lib/excel/columns";
 import {
+  generatedSku,
+  nextSkuSeq,
   validateImportRows,
   type ExistingProductRef,
 } from "@/lib/excel/validate";
@@ -139,63 +141,102 @@ export async function POST(req: Request) {
     let createdCount = 0;
     let updatedCount = 0;
 
-    for (const row of rows) {
-      if (row.action === "error" || !row.payload) continue;
-      const payload = row.payload as Record<string, unknown>;
+    let nextSeq: number | null = null;
 
-      if (row.action === "create") {
-        const created = await Product.create({
-          ...payload,
-          stockSellable: 0,
-          stockTester: 0,
-          stockSample: 0,
-          stockPersonal: 0,
-          lowStockAt: 0,
-          importBatchId: batchId,
-        });
-        row.createdProductId = created._id;
-        createdCount += 1;
-      } else if (row.action === "update") {
-        const sku = String(payload.sku);
-        const existing = await Product.findOne({ sku });
-        if (!existing) continue;
-        row.previousProductSnapshot = {
-          id: existing._id.toString(),
-          sku: existing.sku,
-          name: existing.name,
-          category: existing.category,
-          minMarginPct: existing.minMarginPct,
-          costFifo: existing.costFifo,
-          sellPrice: existing.sellPrice,
-          wholesalePrice: existing.wholesalePrice,
-          brand: existing.brand,
-          concentration: existing.concentration,
-          gender: existing.gender,
-          size: existing.size,
-          collection: existing.collection,
-          notes: existing.notes,
-          itemType: existing.itemType,
-          unit: existing.unit,
-        };
-        existing.name = String(payload.name);
-        existing.category = String(payload.category);
-        existing.unit = payload.unit as "ml" | "pcs";
-        existing.brand = String(payload.brand || "");
-        existing.concentration = String(payload.concentration || "");
-        existing.costFifo = Number(payload.costFifo);
-        existing.sellPrice = Number(payload.sellPrice);
-        existing.wholesalePrice = Number(payload.wholesalePrice || 0);
-        existing.gender = String(payload.gender || "");
-        existing.size = String(payload.size || "");
-        existing.collection = String(payload.collection || "");
-        existing.notes = String(payload.notes || "");
-        existing.itemType = payload.itemType as "finished" | "packaging" | "raw";
-        existing.importBatchId = batchId;
-        await existing.save();
-        updatedCount += 1;
+    // A failed earlier attempt may have written some rows already; progress is
+    // saved on the batch so a retry skips/adopts them instead of duplicating.
+    try {
+      for (const row of rows) {
+        if (row.action === "error" || !row.payload) continue;
+        const payload = row.payload as Record<string, unknown>;
+
+        if (row.action === "create") {
+          if (row.createdProductId) {
+            createdCount += 1;
+            continue;
+          }
+          const clash = await Product.findOne({ sku: String(payload.sku) });
+          if (clash && clash.importBatchId === batchId) {
+            row.createdProductId = clash._id;
+            createdCount += 1;
+            continue;
+          }
+          if (clash) {
+            // SKU was taken after staging — hand out the next free generated one.
+            if (nextSeq == null) {
+              const all = await Product.find({}, { sku: 1 }).lean();
+              nextSeq = nextSkuSeq(all.map((p) => String(p.sku)));
+            }
+            let sku: string;
+            do {
+              sku = generatedSku(String(payload.category), nextSeq);
+              nextSeq += 1;
+            } while (await Product.exists({ sku }));
+            payload.sku = sku;
+            row.sku = sku;
+            row.payload = { ...payload };
+          }
+          const created = await Product.create({
+            ...payload,
+            stockSellable: 0,
+            stockTester: 0,
+            stockSample: 0,
+            stockPersonal: 0,
+            lowStockAt: 0,
+            importBatchId: batchId,
+          });
+          row.createdProductId = created._id;
+          createdCount += 1;
+        } else if (row.action === "update") {
+          const sku = String(payload.sku);
+          const existing = await Product.findOne({ sku });
+          if (!existing) continue;
+          // On retry the product already holds this batch's values; keep the original snapshot.
+          if (existing.importBatchId !== batchId) {
+            row.previousProductSnapshot = {
+              id: existing._id.toString(),
+              sku: existing.sku,
+              name: existing.name,
+              category: existing.category,
+              minMarginPct: existing.minMarginPct,
+              costFifo: existing.costFifo,
+              sellPrice: existing.sellPrice,
+              wholesalePrice: existing.wholesalePrice,
+              brand: existing.brand,
+              concentration: existing.concentration,
+              gender: existing.gender,
+              size: existing.size,
+              collection: existing.collection,
+              notes: existing.notes,
+              itemType: existing.itemType,
+              unit: existing.unit,
+            };
+          }
+          existing.name = String(payload.name);
+          existing.category = String(payload.category);
+          existing.unit = payload.unit as "ml" | "pcs";
+          existing.brand = String(payload.brand || "");
+          existing.concentration = String(payload.concentration || "");
+          existing.costFifo = Number(payload.costFifo);
+          existing.sellPrice = Number(payload.sellPrice);
+          existing.wholesalePrice = Number(payload.wholesalePrice || 0);
+          existing.gender = String(payload.gender || "");
+          existing.size = String(payload.size || "");
+          existing.collection = String(payload.collection || "");
+          existing.notes = String(payload.notes || "");
+          existing.itemType = payload.itemType as "finished" | "packaging" | "raw";
+          existing.importBatchId = batchId;
+          await existing.save();
+          updatedCount += 1;
+        }
       }
+    } catch (error) {
+      batch.markModified("rows");
+      await batch.save().catch(() => {});
+      throw error;
     }
 
+    batch.markModified("rows");
     batch.status = "committed";
     batch.created = createdCount;
     batch.updated = updatedCount;

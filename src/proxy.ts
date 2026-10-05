@@ -41,7 +41,15 @@ export function proxy(request: NextRequest) {
     pathname.startsWith("/api/auth/formula-admin") ||
     pathname.startsWith("/api/quotations/public/");
 
-  const hasSession = Boolean(request.cookies.get(SESSION_COOKIE)?.value);
+  // A cookie that fails signature/expiry validation counts as no session —
+  // otherwise forged or expired cookies would get past the page gate.
+  const rawSession = request.cookies.get(SESSION_COOKIE)?.value;
+  const session = parseSessionToken(rawSession);
+  const hasSession = session !== null;
+  const withClearedCookie = (res: NextResponse) => {
+    if (rawSession && !session) res.cookies.delete(SESSION_COOKIE);
+    return res;
+  };
 
   if (isPublicApi) {
     return withCors(NextResponse.next());
@@ -55,35 +63,32 @@ export function proxy(request: NextRequest) {
     if (hasSession) {
       return NextResponse.redirect(new URL("/", request.url));
     }
-    return NextResponse.next();
+    return withClearedCookie(NextResponse.next());
   }
 
-  // App pages + protected APIs: require cookie presence
-  if (!hasSession) {
+  // App pages + protected APIs: require a valid session
+  if (!session) {
     if (isApi) {
-      return withCors(
-        NextResponse.json(
-          { error: "Authentication required. Please sign in." },
-          { status: 401 },
+      return withClearedCookie(
+        withCors(
+          NextResponse.json(
+            { error: "Authentication required. Please sign in." },
+            { status: 401 },
+          ),
         ),
       );
     }
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("from", pathname);
-    return NextResponse.redirect(loginUrl);
+    return withClearedCookie(NextResponse.redirect(loginUrl));
   }
 
   // App pages only (not API): block pages the role has no permission for,
   // so restricted pages never render even briefly before a client redirect.
   if (!isApi) {
-    const session = parseSessionToken(
-      request.cookies.get(SESSION_COOKIE)?.value,
-    );
-    if (session) {
-      const perm = permissionForPath(pathname);
-      if (perm && !hasPermission(session.role, perm)) {
-        return NextResponse.redirect(new URL("/", request.url));
-      }
+    const perm = permissionForPath(pathname);
+    if (perm && !hasPermission(session.role, perm)) {
+      return NextResponse.redirect(new URL("/", request.url));
     }
   }
 

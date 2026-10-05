@@ -13,6 +13,7 @@ const AR = {
   price: "السعر",
   amount: "المبلغ",
   subtotal: "المجموع الفرعي",
+  discount: "الخصم",
   vat: "ضريبة القيمة المضافة",
   total: "الإجمالي",
   trn: "الرقم الضريبي",
@@ -130,6 +131,13 @@ function linesTable(doc: ReceiptDoc, format: ReceiptFormat): string {
 function totalsBlock(doc: ReceiptDoc): string {
   const currency = doc.store.currency;
   const rows: [string, string, boolean][] = [];
+  if (doc.discountTotal > 0) {
+    rows.push([
+      label("Discount", AR.discount, doc),
+      `-${money(doc.discountTotal, currency)}`,
+      false,
+    ]);
+  }
   if (doc.vatPercent > 0) {
     rows.push([label("Subtotal", AR.subtotal, doc), money(doc.subtotal, currency), false]);
     // Percentage stays inside the English half so bidi does not reorder it.

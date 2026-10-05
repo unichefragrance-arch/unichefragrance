@@ -1,0 +1,85 @@
+import { NextResponse } from "next/server";
+import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { recordAudit } from "@/lib/audit/log";
+import { discountsFor } from "@/lib/sales/createSale";
+import { exceedsDiscountLimit } from "@/lib/sales/discount";
+import {
+  cartFingerprint,
+  issueDiscountApproval,
+  resolveDiscountApproval,
+} from "@/lib/sales/discountApproval";
+import { SaleError } from "@/lib/sales/errors";
+import { validateSaleLines } from "@/lib/sales/validateSale";
+
+/**
+ * POS-071/072: a manager approves an over-limit discount for THIS cart.
+ * Credentials are checked here (rate-limited like login) and exchanged for a
+ * single-use, short-lived token bound to the cashier + cart fingerprint.
+ * POST /api/sales then carries only `discountApprovalToken`.
+ */
+export async function POST(req: Request) {
+  try {
+    const access = requireApiAccess(req);
+    if (access !== null && isAuthResponse(access)) return access;
+    if (access === null) {
+      return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+    }
+
+    const body = await req.json();
+    // Server prices, same as checkout — the % approved is the % that will be charged.
+    const validated = await validateSaleLines(body.lines);
+    const breakdown = discountsFor(
+      validated.lines,
+      body.lines,
+      body.invoiceDiscount,
+      validated.subtotal,
+    );
+    const actor = { userId: access.userId, name: access.name, role: access.role };
+    if (breakdown.discountTotal <= 0 || !exceedsDiscountLimit(breakdown, actor.role)) {
+      return NextResponse.json({ required: false });
+    }
+
+    const approver = await resolveDiscountApproval(breakdown, actor, {
+      email: typeof body.email === "string" ? body.email : undefined,
+      password: typeof body.password === "string" ? body.password : undefined,
+    });
+    // resolveDiscountApproval returns null only when no approval is needed.
+    if (!approver) return NextResponse.json({ required: false });
+
+    const { token, expiresAt } = await issueDiscountApproval({
+      breakdown,
+      actor,
+      approver,
+      fingerprint: cartFingerprint(body.lines, body.invoiceDiscount),
+    });
+
+    recordAudit({
+      session: access,
+      action: "discount_approved",
+      entityType: "Sale",
+      detail: `${breakdown.maxDiscountPct}% (−${breakdown.discountTotal}) approved by ${approver.name} (${approver.role})`,
+      req,
+    });
+
+    return NextResponse.json({
+      required: true,
+      approvalToken: token,
+      expiresAt,
+      approver: { name: approver.name, role: approver.role },
+      maxDiscountPct: breakdown.maxDiscountPct,
+      discountTotal: breakdown.discountTotal,
+    });
+  } catch (error) {
+    const denied =
+      error instanceof SaleError &&
+      (error.code === "DISCOUNT_APPROVAL_REQUIRED" || error.code === "DISCOUNT_NOT_AUTHORIZED");
+    const clientError = error instanceof SaleError || error instanceof SyntaxError;
+    return NextResponse.json(
+      {
+        error: safeErrorMessage(error, "Could not approve discount"),
+        code: error instanceof SaleError ? error.code : "UNKNOWN",
+      },
+      { status: denied ? 403 : clientError ? 400 : 500 },
+    );
+  }
+}

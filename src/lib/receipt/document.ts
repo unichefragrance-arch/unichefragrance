@@ -66,6 +66,8 @@ export function buildReceiptDoc(input: {
   lines: ReceiptLine[];
   /** Gross amount actually charged. Falls back to the sum of the lines. */
   total?: number;
+  /** Line + invoice discounts already deducted from `total`. */
+  discountTotal?: number;
   settings?: ReceiptSettingsInput | null;
 }): ReceiptDoc {
   const store = receiptStoreFromSettings(input.settings);
@@ -99,6 +101,7 @@ export function buildReceiptDoc(input: {
     subtotal: round2(gross - vatAmount),
     vatPercent,
     vatAmount,
+    discountTotal: round2(Math.max(0, Number(input.discountTotal ?? 0) || 0)),
     total: round2(gross),
   };
 }

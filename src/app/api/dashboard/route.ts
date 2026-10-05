@@ -8,6 +8,21 @@ import { hasPermission } from "@/lib/auth/roles";
 import { resolveBranchScope } from "@/lib/reporting-engine/access";
 import type { AppSession } from "@/lib/auth/session";
 
+/** Revenue + recorded FIFO cost (inventoryDeductions[].costTotal), summed in MongoDB. */
+async function revenueAndFifoCost(match: Record<string, unknown>) {
+  const [row] = await Sale.aggregate<{ revenue: number; cost: number }>([
+    { $match: match },
+    {
+      $group: {
+        _id: null,
+        revenue: { $sum: "$total" },
+        cost: { $sum: { $sum: "$inventoryDeductions.costTotal" } },
+      },
+    },
+  ]);
+  return { revenue: row?.revenue ?? 0, cost: row?.cost ?? 0 };
+}
+
 export async function GET(req: Request) {
   try {
     const access = requireApiAccess(req);
@@ -36,15 +51,55 @@ export async function GET(req: Request) {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-    const todaySales = await Sale.find({
-      status: "completed",
-      createdAt: { $gte: startOfToday },
-      ...branchFilter,
-    });
+    // Today's widgets are aggregated inside MongoDB ($facet) — loading every
+    // sale into Node made this endpoint (and, via event-loop stalls, the POS
+    // checkout queue) scale badly with sales volume.
+    type TodayFacet = {
+      totals: { total: number; count: number; remix: number }[];
+      payments: { _id: string; amount: number; count: number }[];
+      products: { _id: string; qty: number; revenue: number; unit: string | null }[];
+      recent: { _id: unknown; createdAt: Date; customerName: string; saleType: string; total: number; payment: string }[];
+    };
+    const [today] = await Sale.aggregate<TodayFacet>([
+      { $match: { status: "completed", createdAt: { $gte: startOfToday }, ...branchFilter } },
+      {
+        $facet: {
+          totals: [
+            {
+              $group: {
+                _id: null,
+                total: { $sum: "$total" },
+                count: { $sum: 1 },
+                remix: { $sum: { $cond: [{ $eq: ["$saleType", "Remix"] }, 1, 0] } },
+              },
+            },
+          ],
+          payments: [{ $group: { _id: "$payment", amount: { $sum: "$total" }, count: { $sum: 1 } } }],
+          products: [
+            { $unwind: "$lines" },
+            {
+              $group: {
+                _id: "$lines.name",
+                qty: { $sum: "$lines.qty" },
+                revenue: { $sum: { $multiply: ["$lines.qty", "$lines.unitPrice"] } },
+                unit: { $first: "$lines.unitLabel" },
+              },
+            },
+            { $sort: { revenue: -1 } },
+            { $limit: 6 },
+          ],
+          recent: [
+            { $sort: { createdAt: -1 } },
+            { $limit: 8 },
+            { $project: { createdAt: 1, customerName: 1, saleType: 1, total: 1, payment: 1 } },
+          ],
+        },
+      },
+    ]);
 
-    const todayTotal = todaySales.reduce((s, x) => s + x.total, 0);
-    const remixCount = todaySales.filter((s) => s.saleType === "Remix").length;
-    const transactionsToday = todaySales.length;
+    const todayTotal = today?.totals[0]?.total ?? 0;
+    const remixCount = today?.totals[0]?.remix ?? 0;
+    const transactionsToday = today?.totals[0]?.count ?? 0;
     const avgSaleValue =
       transactionsToday > 0
         ? Math.round((todayTotal / transactionsToday) * 100) / 100
@@ -52,44 +107,21 @@ export async function GET(req: Request) {
 
     // POS dashboard charts — how today's till is being paid, and what's
     // actually moving off the shelf, at the front desk / cashier level.
-    const paymentTotals = new Map<string, { amount: number; count: number }>();
-    const productTotals = new Map<string, { qty: number; revenue: number; unit: string }>();
-    for (const sale of todaySales) {
-      const payEntry = paymentTotals.get(sale.payment) || { amount: 0, count: 0 };
-      payEntry.amount += sale.total;
-      payEntry.count += 1;
-      paymentTotals.set(sale.payment, payEntry);
-
-      for (const line of sale.lines || []) {
-        const key = line.name;
-        const prodEntry = productTotals.get(key) || {
-          qty: 0,
-          revenue: 0,
-          unit: line.unitLabel || "",
-        };
-        prodEntry.qty += line.qty;
-        prodEntry.revenue += line.qty * line.unitPrice;
-        productTotals.set(key, prodEntry);
-      }
-    }
-    const paymentMix = Array.from(paymentTotals.entries())
-      .map(([method, { amount, count }]) => ({
-        method: method.charAt(0).toUpperCase() + method.slice(1),
+    const paymentMix = (today?.payments ?? [])
+      .map(({ _id: method, amount, count }) => ({
+        method: String(method).charAt(0).toUpperCase() + String(method).slice(1),
         amount: Math.round(amount * 100) / 100,
         count,
       }))
       .sort((a, b) => b.amount - a.amount);
-    const topProductsToday = Array.from(productTotals.entries())
-      .map(([name, { qty, revenue, unit }]) => ({
-        name,
-        qty: Math.round(qty * 1000) / 1000,
-        unit,
-        revenue: Math.round(revenue * 100) / 100,
-      }))
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 6);
+    const topProductsToday = (today?.products ?? []).map(({ _id: name, qty, revenue, unit }) => ({
+      name,
+      qty: Math.round(qty * 1000) / 1000,
+      unit: unit || "",
+      revenue: Math.round(revenue * 100) / 100,
+    }));
 
-    const products = await Product.find();
+    const products = await Product.find().lean();
     const fifoValue = products.reduce(
       (s, p) => s + p.stockSellable * p.costFifo,
       0,
@@ -147,43 +179,42 @@ export async function GET(req: Request) {
     weekAgo.setDate(weekAgo.getDate() - 6);
     weekAgo.setHours(0, 0, 0, 0);
 
-    const weekSales = await Sale.find({
-      status: "completed",
-      createdAt: { $gte: weekAgo },
-      ...branchFilter,
-    });
+    // Per local day × sale type, summed in MongoDB (server time zone, same
+    // calendar days as the setHours() boundaries this used before).
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const weekRows = await Sale.aggregate<{ _id: { day: string; type: string }; total: number }>([
+      { $match: { status: "completed", createdAt: { $gte: weekAgo }, ...branchFilter } },
+      {
+        $group: {
+          _id: {
+            day: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone } },
+            type: "$saleType",
+          },
+          total: { $sum: "$total" },
+        },
+      },
+    ]);
+    const dayKey = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const sumFor = (day: string, types: string[]) =>
+      weekRows
+        .filter((r) => r._id.day === day && types.includes(r._id.type))
+        .reduce((sum, r) => sum + r.total, 0);
 
     const labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const salesTrend = Array.from({ length: 7 }).map((_, i) => {
       const d = new Date(weekAgo);
       d.setDate(weekAgo.getDate() + i);
-      const dayStart = new Date(d);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(d);
-      dayEnd.setHours(23, 59, 59, 999);
-      const daySales = weekSales.filter(
-        (s) => s.createdAt >= dayStart && s.createdAt <= dayEnd,
-      );
+      const key = dayKey(d);
       return {
         label: labels[d.getDay()],
-        retail: daySales
-          .filter((s) => s.saleType === "Retail" || s.saleType === "Mixed")
-          .reduce((sum, s) => sum + s.total, 0),
-        wholesale: daySales
-          .filter((s) => s.saleType === "Wholesale")
-          .reduce((sum, s) => sum + s.total, 0),
-        remix: daySales
-          .filter(
-            (s) =>
-              s.saleType === "Remix" ||
-              s.saleType === "Oil" ||
-              s.saleType === "Refill",
-          )
-          .reduce((sum, s) => sum + s.total, 0),
+        retail: sumFor(key, ["Retail", "Mixed"]),
+        wholesale: sumFor(key, ["Wholesale"]),
+        remix: sumFor(key, ["Remix", "Oil", "Refill"]),
       };
     });
 
-    const weekTotal = weekSales.reduce((s, x) => s + x.total, 0);
+    const weekTotal = weekRows.reduce((s, r) => s + r.total, 0);
 
     // Accountant-facing financial widgets — mirror the reporting engine's
     // cash-closing / expenses-by-category / profit-margin / credit-follow-up
@@ -219,21 +250,11 @@ export async function GET(req: Request) {
       }))
       .sort((a, b) => b.amount - a.amount);
 
-    const monthSales = await Sale.find({
+    const { revenue: monthRevenue, cost: monthCost } = await revenueAndFifoCost({
       status: "completed",
       createdAt: { $gte: startOfMonth },
       ...branchFilter,
-    }).select("total inventoryDeductions");
-    const monthRevenue = monthSales.reduce((s, sale) => s + sale.total, 0);
-    const monthCost = monthSales.reduce(
-      (s, sale) =>
-        s +
-        (sale.inventoryDeductions || []).reduce(
-          (sum: number, d: { costTotal?: number }) => sum + (d.costTotal || 0),
-          0,
-        ),
-      0,
-    );
+    });
     const grossProfit = Math.round((monthRevenue - monthCost) * 100) / 100;
     const netProfit = Math.round((grossProfit - monthExpenseTotal) * 100) / 100;
     // Replaces the old hardcoded 42.6 stub — both margins now move with
@@ -249,21 +270,11 @@ export async function GET(req: Request) {
     startOfLastMonth.setMonth(startOfMonth.getMonth() - 1);
     const endOfLastMonth = new Date(startOfMonth.getTime() - 1);
 
-    const lastMonthSales = await Sale.find({
+    const { revenue: lastMonthRevenue, cost: lastMonthCost } = await revenueAndFifoCost({
       status: "completed",
       createdAt: { $gte: startOfLastMonth, $lte: endOfLastMonth },
       ...branchFilter,
-    }).select("total inventoryDeductions");
-    const lastMonthRevenue = lastMonthSales.reduce((s, sale) => s + sale.total, 0);
-    const lastMonthCost = lastMonthSales.reduce(
-      (s, sale) =>
-        s +
-        (sale.inventoryDeductions || []).reduce(
-          (sum: number, d: { costTotal?: number }) => sum + (d.costTotal || 0),
-          0,
-        ),
-      0,
-    );
+    });
     const lastMonthExpenses = await Expense.find({
       date: { $gte: startOfLastMonth, $lte: endOfLastMonth },
       ...branchFilter,
@@ -383,10 +394,7 @@ export async function GET(req: Request) {
         : []),
     ];
 
-    const recentSales = todaySales
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-      .slice(0, 8)
-      .map((s) => ({
+    const recentSales = (today?.recent ?? []).map((s) => ({
         id: String(s._id),
         time: s.createdAt.toLocaleTimeString("en-GB", {
           hour: "2-digit",

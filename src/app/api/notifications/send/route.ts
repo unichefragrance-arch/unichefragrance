@@ -36,6 +36,8 @@ type Body = {
   subject?: string;
   message?: string;
   total?: number;
+  /** Receipt only: line + invoice discounts already taken off `total`. */
+  discountTotal?: number;
   payment?: string;
   salesperson?: string;
   lines?: ReceiptLine[];
@@ -292,6 +294,7 @@ async function buildContent(input: {
           payment: body.payment,
           lines: body.lines ?? [],
           total: body.total,
+          discountTotal: body.discountTotal,
           settings,
         })
       : body.saleId
@@ -303,6 +306,7 @@ async function buildContent(input: {
             payment: body.payment,
             lines: body.lines ?? [],
             total: body.total,
+            discountTotal: body.discountTotal,
             settings,
           });
 

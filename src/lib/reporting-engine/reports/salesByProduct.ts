@@ -4,7 +4,12 @@ import { Product, Sale } from "@/lib/models";
 import { registerReport } from "../registry";
 import type { ReportRow } from "../types";
 
-/** RPT-02: sold quantity/revenue per product, with category and brand. */
+/**
+ * RPT-02: sold quantity/revenue per product, with category and brand.
+ * Revenue is net of discounts (POS-073): the line's own discount, plus its
+ * share of the bill discount pro rata to line value — so the report total
+ * matches what the profit report and cash closing count.
+ */
 registerReport({
   id: "sales-by-product",
   label: "Sales by product",
@@ -29,9 +34,49 @@ registerReport({
       match.branchId = new Types.ObjectId(filters.branchId);
     }
 
+    const lineNet = {
+      $subtract: [
+        { $multiply: ["$$l.qty", "$$l.unitPrice"] },
+        { $ifNull: ["$$l.discountAmount", 0] },
+      ],
+    };
     const grouped = await Sale.aggregate([
       { $match: match },
+      {
+        $addFields: {
+          linesNet: { $sum: { $map: { input: "$lines", as: "l", in: lineNet } } },
+        },
+      },
       { $unwind: "$lines" },
+      {
+        $addFields: {
+          lineRevenue: {
+            $let: {
+              vars: {
+                net: {
+                  $subtract: [
+                    { $multiply: ["$lines.qty", "$lines.unitPrice"] },
+                    { $ifNull: ["$lines.discountAmount", 0] },
+                  ],
+                },
+                bill: { $ifNull: ["$invoiceDiscountAmount", 0] },
+              },
+              in: {
+                $subtract: [
+                  "$$net",
+                  {
+                    $cond: [
+                      { $gt: ["$linesNet", 0] },
+                      { $divide: [{ $multiply: ["$$bill", "$$net"] }, "$linesNet"] },
+                      0,
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
       {
         $lookup: {
           from: Product.collection.name,
@@ -47,7 +92,7 @@ registerReport({
           category: { $first: "$product.category" },
           brand: { $first: "$product.brand" },
           qty: { $sum: "$lines.qty" },
-          revenue: { $sum: { $multiply: ["$lines.qty", "$lines.unitPrice"] } },
+          revenue: { $sum: "$lineRevenue" },
         },
       },
       { $sort: { revenue: -1 } },

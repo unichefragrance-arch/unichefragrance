@@ -10,14 +10,16 @@
  * block, and the child server process is always killed on exit.
  *
  * Requires: DATABASE_URL + SESSION_SECRET in the environment (loaded via
- * `tsx --env-file=.env`), and that DB be a dev/staging instance — this
- * writes and deletes real documents in it.
+ * `tsx --env-file=.env`). This writes and deletes real documents, so it
+ * refuses to run unless DATABASE_URL points at localhost (see e2eGuard);
+ * set E2E_ALLOW_REMOTE_DB=1 only for a dedicated dev/staging DB.
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connectDB } from "../db";
 import { Product, Supplier, PurchaseOrder, FifoLayer } from "../models";
 import { createSessionToken } from "../auth/session";
+import { assertLocalDb } from "../e2eGuard";
 
 const PORT = Number(process.env.E2E_PORT || 3911);
 const BASE = `http://localhost:${PORT}`;
@@ -56,10 +58,13 @@ async function waitForServer(timeoutMs = 60_000) {
 }
 
 function startServer(): ChildProcess {
+  // Own process group so stopServer can kill npx AND the next-server child
+  // (SIGTERM to npx alone leaves next-server orphaned on the port).
   const proc = spawn("npx", ["next", "dev", "-p", String(PORT)], {
     cwd: process.cwd(),
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   });
   proc.stdout?.on("data", () => {});
   proc.stderr?.on("data", () => {});
@@ -68,7 +73,11 @@ function startServer(): ChildProcess {
 
 async function stopServer(proc: ChildProcess) {
   if (!proc.pid) return;
-  proc.kill("SIGTERM");
+  try {
+    process.kill(-proc.pid, "SIGTERM");
+  } catch {
+    proc.kill("SIGTERM");
+  }
   await new Promise<void>((resolve) => {
     const t = setTimeout(resolve, 5000);
     proc.once("exit", () => {
@@ -79,6 +88,7 @@ async function stopServer(proc: ChildProcess) {
 }
 
 async function main() {
+  assertLocalDb();
   await connectDB();
 
   const supplier = await Supplier.create({

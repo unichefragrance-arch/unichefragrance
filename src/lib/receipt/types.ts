@@ -41,5 +41,7 @@ export type ReceiptDoc = {
   subtotal: number;
   vatPercent: number;
   vatAmount: number;
+  /** POS discounts (line + invoice) already taken off `total`; 0 when none. */
+  discountTotal: number;
   total: number;
 };

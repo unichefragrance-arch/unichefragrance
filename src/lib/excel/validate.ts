@@ -62,6 +62,22 @@ function parseSizeNumber(size: string): number | null {
   return Number(m[1]);
 }
 
+const GENERATED_SKU_RE = /^UN-[A-Z]{2}-(\d+)$/i;
+
+/** Next free generated-SKU sequence number, past every existing UN-XX-NNNN SKU. */
+export function nextSkuSeq(existingSkus: Iterable<string>): number {
+  let max = 0;
+  for (const sku of existingSkus) {
+    const m = sku.trim().match(GENERATED_SKU_RE);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max + 1;
+}
+
+export function generatedSku(category: string, seq: number): string {
+  return `UN-${categoryCode(category || "XX")}-${String(seq).padStart(4, "0")}`;
+}
+
 function priceFloorOk(retail: number, cost: number, minMarginPct: number): boolean {
   const floor = cost * (1 + minMarginPct / 100);
   return retail + 1e-9 >= floor;
@@ -83,7 +99,12 @@ export function validateImportRows(
   const fileNameCat = new Map<string, number>();
   const fileSkus = new Map<string, number>();
   const results: ValidatedImportRow[] = [];
-  let createSeq = existing.length + 1;
+  const takenSkus = new Set(existing.map((p) => p.sku.toLowerCase()));
+  for (const row of rows) {
+    const code = row.internalCode.trim().toLowerCase();
+    if (code) takenSkus.add(code);
+  }
+  let createSeq = nextSkuSeq(existing.map((p) => p.sku));
 
   for (const row of rows) {
     const errors: string[] = [];
@@ -95,7 +116,9 @@ export function validateImportRows(
     if (row.retailPrice == null) errors.push("Missing Retail Price");
     if (!row.itemType) errors.push("Missing Item Type — pick one from the Lists sheet");
 
-    const category = row.category as ProductCategory;
+    const category = (PRODUCT_CATEGORIES.find(
+      (c) => c.toLowerCase() === row.category.toLowerCase(),
+    ) ?? row.category) as ProductCategory;
     if (row.category && !PRODUCT_CATEGORIES.includes(category)) {
       errors.push(`Category "${row.category}" isn't on the list — pick one from the Lists sheet`);
     }
@@ -105,9 +128,12 @@ export function validateImportRows(
       errors.push(`Unit "${row.unit}" isn't valid — use ml, pcs, g, or kg`);
     }
 
+    const concentration =
+      CONCENTRATIONS.find((c) => c.toLowerCase() === row.concentration.toLowerCase()) ??
+      row.concentration;
     if (
-      row.concentration &&
-      !CONCENTRATIONS.includes(row.concentration as (typeof CONCENTRATIONS)[number])
+      concentration &&
+      !CONCENTRATIONS.includes(concentration as (typeof CONCENTRATIONS)[number])
     ) {
       errors.push(`Concentration "${row.concentration}" isn't on the list — pick one from the Lists sheet`);
     }
@@ -183,8 +209,11 @@ export function validateImportRows(
           `A product with this Name + Category already exists (Internal Code "${clash}") — fill in Internal Code to update it instead`,
         );
       }
-      sku = `UN-${categoryCode(row.category || "XX")}-${String(createSeq).padStart(4, "0")}`;
-      createSeq += 1;
+      do {
+        sku = generatedSku(category, createSeq);
+        createSeq += 1;
+      } while (takenSkus.has(sku.toLowerCase()));
+      takenSkus.add(sku.toLowerCase());
       action = "create";
     }
 
@@ -229,7 +258,7 @@ export function validateImportRows(
         category,
         unit,
         brand: row.brand,
-        concentration: row.concentration,
+        concentration,
         costFifo: row.costPrice!,
         sellPrice: row.retailPrice!,
         wholesalePrice: row.wholesalePrice ?? 0,

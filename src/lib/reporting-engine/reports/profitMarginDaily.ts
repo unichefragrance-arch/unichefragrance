@@ -1,15 +1,14 @@
 import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Sale } from "@/lib/models";
-import { toDateInputValue } from "@/lib/reports/period";
 import { registerReport } from "../registry";
 import type { ReportRow } from "../types";
 
 /**
  * RPT-04: gross profit = revenue − FIFO cost actually consumed
  * (`inventoryDeductions[].costTotal`, recorded per sale at checkout).
- * Discount is not tracked on the Sale model today, so it's left out
- * rather than estimated.
+ * Revenue is `total`, which is already net of line + invoice discounts
+ * (POS-073), so a discount lowers profit and margin here automatically.
  */
 registerReport({
   id: "profit-margin-daily",
@@ -35,20 +34,20 @@ registerReport({
       match.branchId = new Types.ObjectId(filters.branchId);
     }
 
-    const sales = await Sale.find(match).select("createdAt total inventoryDeductions").lean();
-
-    const byDay = new Map<string, { revenue: number; cost: number }>();
-    for (const sale of sales) {
-      const day = toDateInputValue(new Date(sale.createdAt));
-      const cost = (sale.inventoryDeductions || []).reduce(
-        (s: number, d: { costTotal?: number }) => s + (d.costTotal || 0),
-        0,
-      );
-      const bucket = byDay.get(day) || { revenue: 0, cost: 0 };
-      bucket.revenue += sale.total;
-      bucket.cost += cost;
-      byDay.set(day, bucket);
-    }
+    // Summed per day inside MongoDB (not by loading every sale into Node):
+    // day = server-local calendar date, same as toDateInputValue().
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const grouped = await Sale.aggregate<{ _id: string; revenue: number; cost: number }>([
+      { $match: match },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone } },
+          revenue: { $sum: "$total" },
+          cost: { $sum: { $sum: "$inventoryDeductions.costTotal" } },
+        },
+      },
+    ]);
+    const byDay = new Map(grouped.map((g) => [g._id, { revenue: g.revenue, cost: g.cost }]));
 
     const rows: ReportRow[] = Array.from(byDay.entries())
       .sort(([a], [b]) => a.localeCompare(b))

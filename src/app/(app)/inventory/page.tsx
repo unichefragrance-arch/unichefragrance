@@ -569,6 +569,203 @@ export default function InventoryPage() {
     }
   }
 
+  const errorRows = staging?.rows.filter((r) => r.action === "error") ?? [];
+  const hasWritable =
+    Boolean(staging && (staging.created > 0 || staging.updated > 0)) ||
+    Boolean(staging && adminOverride && staging.priceFloorCount > 0 && adminPassword);
+  const strictBlocked = Boolean(safeMode && staging && staging.failed > 0);
+
+  const importModal = importOpen ? (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4">
+        <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-line bg-paper shadow-xl">
+          <div className="flex items-center justify-between border-b border-line/70 px-5 py-4">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gold">
+                Catalogue import
+              </p>
+              <h2 className="mt-1 font-semibold text-xl text-ink">Excel Import</h2>
+            </div>
+            <button
+              type="button"
+              className="rounded-lg p-2 text-ink-muted hover:bg-mist hover:text-ink"
+              onClick={() => {
+                setImportOpen(false);
+                setStaging(null);
+              }}
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+
+          <div className="space-y-4 px-5 py-4">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void downloadTemplate().catch((e) => flash(e.message))}
+              >
+                <FileSpreadsheet className="h-4 w-4" />
+                1) Download Template
+              </Button>
+              <Button
+                variant="gold"
+                size="sm"
+                disabled={stageBusy}
+                onClick={() => fileRef.current?.click()}
+              >
+                <Upload className="h-4 w-4" />
+                {stageBusy ? "Checking File…" : "2) Upload File"}
+              </Button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".xlsx,.xls"
+                className="hidden"
+                onChange={(e) => void onFileSelected(e.target.files?.[0] || null)}
+              />
+            </div>
+
+            {staging ? (
+              <>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <MiniStat label="Rows in file" value={String(staging.total)} />
+                  <MiniStat label="New products" value={String(staging.created)} />
+                  <MiniStat label="Products to update" value={String(staging.updated)} />
+                  <MiniStat label="Rows to fix" value={String(staging.failed)} />
+                </div>
+
+                {staging.priceFloorCount > 0 ? (
+                  <div className="rounded-lg border border-line bg-mist/50 px-3 py-3 text-sm">
+                    <p className="font-medium text-ink">
+                      {staging.priceFloorCount} row needs admin price approval
+                    </p>
+                    <label className="mt-2 flex items-center gap-2 text-xs text-ink-muted">
+                      <input
+                        type="checkbox"
+                        checked={adminOverride}
+                        onChange={(e) => setAdminOverride(e.target.checked)}
+                      />
+                      Allow admin price exception (password)
+                    </label>
+                    {adminOverride ? (
+                      <input
+                        type="password"
+                        placeholder="Admin password"
+                        value={adminPassword}
+                        onChange={(e) => setAdminPassword(e.target.value)}
+                        className="mt-2 h-9 w-full rounded border border-line bg-paper px-2 text-sm"
+                      />
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {errorRows.length > 0 ? (
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-sm font-medium">Rows needing fix</p>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => void downloadErrors()}
+                      >
+                        Download Fix File
+                      </Button>
+                    </div>
+                    <p className="mb-2 text-xs text-ink-muted">
+                      Fix these rows and upload the file again.
+                    </p>
+                    <div className="max-h-48 overflow-auto rounded-lg border border-line">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-mist/70 text-ink-muted">
+                          <tr>
+                            <th className="px-3 py-2">Row</th>
+                            <th className="px-3 py-2">Product Code</th>
+                            <th className="px-3 py-2">What to fix</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {errorRows.map((r) => (
+                            <tr key={r.rowNumber} className="border-t border-line/60">
+                              <td className="px-3 py-2 align-top">{r.rowNumber}</td>
+                              <td className="px-3 py-2 align-top">{r.sku || "—"}</td>
+                              <td className="px-3 py-2 align-top text-ink-muted">
+                                <ul className="list-disc space-y-0.5 pl-4">
+                                  {(r.errorReason || "")
+                                    .split(";")
+                                    .map((issue) => issue.trim())
+                                    .filter(Boolean)
+                                    .map((issue, i) => (
+                                      <li key={i}>{issue}</li>
+                                    ))}
+                                </ul>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-sage">All rows passed validation.</p>
+                )}
+
+                <div className="rounded-lg border border-line bg-mist/50 px-3 py-3 text-sm">
+                  <label className="flex items-center gap-2 text-ink">
+                    <input
+                      type="checkbox"
+                      checked={safeMode}
+                      onChange={(e) => setSafeMode(e.target.checked)}
+                    />
+                    Safe Mode (Stop if any error)
+                  </label>
+                  <p className="mt-1 text-xs text-ink-muted">
+                    On: import stops if any row has an issue. Off: good rows import, bad
+                    rows skip.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap gap-2 border-t border-line/70 pt-4">
+                  <Button
+                    variant="gold"
+                    disabled={commitBusy || !hasWritable || strictBlocked}
+                    onClick={() => void commitImport()}
+                  >
+                    {commitBusy ? "Importing…" : "Import Now"}
+                  </Button>
+                  {strictBlocked ? (
+                    <Button variant="secondary" onClick={() => void downloadErrors()}>
+                      Fix File & Re-upload
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setStaging(null);
+                      setAdminOverride(false);
+                      setAdminPassword("");
+                    }}
+                  >
+                    Reset
+                  </Button>
+                </div>
+                <p className="text-[11px] text-ink-muted">
+                  Batch {staging.batchId} ·{" "}
+                  {safeMode
+                    ? "Safe Mode is ON: fix all rows first."
+                    : "Safe Mode is OFF: valid rows will import."}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-ink-muted">
+                Download the flat template, fill one product per row, then upload for a
+                dry-run preview before anything hits the database.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+  ) : null;
+
   if (loading) return <LoadingState label="Loading inventory…" />;
   if (error) return <ErrorState message={error} onRetry={reload} />;
   if (!inventory.length) {
@@ -585,15 +782,11 @@ export default function InventoryPage() {
             </Button>
           }
         />
+        {importModal}
       </div>
     );
   }
 
-  const errorRows = staging?.rows.filter((r) => r.action === "error") ?? [];
-  const hasWritable =
-    Boolean(staging && (staging.created > 0 || staging.updated > 0)) ||
-    Boolean(staging && adminOverride && staging.priceFloorCount > 0 && adminPassword);
-  const strictBlocked = Boolean(safeMode && staging && staging.failed > 0);
   const topCards = valuation.categories.slice(0, 4);
 
   return (
@@ -1106,196 +1299,7 @@ export default function InventoryPage() {
         </div>
       </div>
 
-      {importOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4">
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-line bg-paper shadow-xl">
-            <div className="flex items-center justify-between border-b border-line/70 px-5 py-4">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gold">
-                  Catalogue import
-                </p>
-                <h2 className="mt-1 font-semibold text-xl text-ink">Excel Import</h2>
-              </div>
-              <button
-                type="button"
-                className="rounded-lg p-2 text-ink-muted hover:bg-mist hover:text-ink"
-                onClick={() => {
-                  setImportOpen(false);
-                  setStaging(null);
-                }}
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="space-y-4 px-5 py-4">
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void downloadTemplate().catch((e) => flash(e.message))}
-                >
-                  <FileSpreadsheet className="h-4 w-4" />
-                  1) Download Template
-                </Button>
-                <Button
-                  variant="gold"
-                  size="sm"
-                  disabled={stageBusy}
-                  onClick={() => fileRef.current?.click()}
-                >
-                  <Upload className="h-4 w-4" />
-                  {stageBusy ? "Checking File…" : "2) Upload File"}
-                </Button>
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept=".xlsx,.xls"
-                  className="hidden"
-                  onChange={(e) => void onFileSelected(e.target.files?.[0] || null)}
-                />
-              </div>
-
-              {staging ? (
-                <>
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <MiniStat label="Rows in file" value={String(staging.total)} />
-                    <MiniStat label="New products" value={String(staging.created)} />
-                    <MiniStat label="Products to update" value={String(staging.updated)} />
-                    <MiniStat label="Rows to fix" value={String(staging.failed)} />
-                  </div>
-
-                  {staging.priceFloorCount > 0 ? (
-                    <div className="rounded-lg border border-line bg-mist/50 px-3 py-3 text-sm">
-                      <p className="font-medium text-ink">
-                        {staging.priceFloorCount} row needs admin price approval
-                      </p>
-                      <label className="mt-2 flex items-center gap-2 text-xs text-ink-muted">
-                        <input
-                          type="checkbox"
-                          checked={adminOverride}
-                          onChange={(e) => setAdminOverride(e.target.checked)}
-                        />
-                        Allow admin price exception (password)
-                      </label>
-                      {adminOverride ? (
-                        <input
-                          type="password"
-                          placeholder="Admin password"
-                          value={adminPassword}
-                          onChange={(e) => setAdminPassword(e.target.value)}
-                          className="mt-2 h-9 w-full rounded border border-line bg-paper px-2 text-sm"
-                        />
-                      ) : null}
-                    </div>
-                  ) : null}
-
-                  {errorRows.length > 0 ? (
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <p className="text-sm font-medium">Rows needing fix</p>
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => void downloadErrors()}
-                        >
-                          Download Fix File
-                        </Button>
-                      </div>
-                      <p className="mb-2 text-xs text-ink-muted">
-                        Fix these rows and upload the file again.
-                      </p>
-                      <div className="max-h-48 overflow-auto rounded-lg border border-line">
-                        <table className="w-full text-left text-xs">
-                          <thead className="bg-mist/70 text-ink-muted">
-                            <tr>
-                              <th className="px-3 py-2">Row</th>
-                              <th className="px-3 py-2">Product Code</th>
-                              <th className="px-3 py-2">What to fix</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {errorRows.map((r) => (
-                              <tr key={r.rowNumber} className="border-t border-line/60">
-                                <td className="px-3 py-2 align-top">{r.rowNumber}</td>
-                                <td className="px-3 py-2 align-top">{r.sku || "—"}</td>
-                                <td className="px-3 py-2 align-top text-ink-muted">
-                                  <ul className="list-disc space-y-0.5 pl-4">
-                                    {(r.errorReason || "")
-                                      .split(";")
-                                      .map((issue) => issue.trim())
-                                      .filter(Boolean)
-                                      .map((issue, i) => (
-                                        <li key={i}>{issue}</li>
-                                      ))}
-                                  </ul>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="text-sm text-sage">All rows passed validation.</p>
-                  )}
-
-                  <div className="rounded-lg border border-line bg-mist/50 px-3 py-3 text-sm">
-                    <label className="flex items-center gap-2 text-ink">
-                      <input
-                        type="checkbox"
-                        checked={safeMode}
-                        onChange={(e) => setSafeMode(e.target.checked)}
-                      />
-                      Safe Mode (Stop if any error)
-                    </label>
-                    <p className="mt-1 text-xs text-ink-muted">
-                      On: import stops if any row has an issue. Off: good rows import, bad
-                      rows skip.
-                    </p>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2 border-t border-line/70 pt-4">
-                    <Button
-                      variant="gold"
-                      disabled={commitBusy || !hasWritable || strictBlocked}
-                      onClick={() => void commitImport()}
-                    >
-                      {commitBusy ? "Importing…" : "Import Now"}
-                    </Button>
-                    {strictBlocked ? (
-                      <Button variant="secondary" onClick={() => void downloadErrors()}>
-                        Fix File & Re-upload
-                      </Button>
-                    ) : null}
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        setStaging(null);
-                        setAdminOverride(false);
-                        setAdminPassword("");
-                      }}
-                    >
-                      Reset
-                    </Button>
-                  </div>
-                  <p className="text-[11px] text-ink-muted">
-                    Batch {staging.batchId} ·{" "}
-                    {safeMode
-                      ? "Safe Mode is ON: fix all rows first."
-                      : "Safe Mode is OFF: valid rows will import."}
-                  </p>
-                </>
-              ) : (
-                <p className="text-sm text-ink-muted">
-                  Download the flat template, fill one product per row, then upload for a
-                  dry-run preview before anything hits the database.
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+      {importModal}
     </div>
   );
 }

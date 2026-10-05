@@ -59,31 +59,43 @@ export function tolaToMl(unit: "tola" | "half_tola" | "quarter_tola"): number {
   return QUARTER_TOLA_ML;
 }
 
+const TOLA_LABEL_ML: Record<string, number> = {
+  "1 tola": TOLA_ML,
+  tola: TOLA_ML,
+  "full tola": TOLA_ML,
+  "1tola": TOLA_ML,
+  "½ tola": HALF_TOLA_ML,
+  "1/2 tola": HALF_TOLA_ML,
+  "half tola": HALF_TOLA_ML,
+  "half-tola": HALF_TOLA_ML,
+  "¼ tola": QUARTER_TOLA_ML,
+  "1/4 tola": QUARTER_TOLA_ML,
+  "quarter tola": QUARTER_TOLA_ML,
+  "quarter-tola": QUARTER_TOLA_ML,
+};
+
+/**
+ * Approved individual-oil sizes only: ¼ / ½ / 1 tola → 3 / 6 / 12 ml.
+ * Whole-label match, so "1½ Tola", "2 Tola" or "7 ml" are NOT oil sizes (→ null).
+ */
+export function resolveOilTolaMl(unitLabel?: string): number | null {
+  if (!unitLabel?.trim()) return null;
+  const t = unitLabel.trim().toLowerCase().replace(/\s+/g, " ");
+  return TOLA_LABEL_ML[t] ?? null;
+}
+
 /**
  * Backend-owned oil/refill ml from unitLabel — never trust client deductMl.
  * Supports: 1 Tola / ½ Tola / ¼ Tola, and explicit "N ml" labels (e.g. refill).
  */
 export function resolveDeductMlFromUnitLabel(unitLabel?: string): number | null {
   if (!unitLabel?.trim()) return null;
+  const tola = resolveOilTolaMl(unitLabel);
+  if (tola != null) return tola;
   const t = unitLabel.trim().toLowerCase().replace(/\s+/g, " ");
-
-  if (t === "1 tola" || t === "tola" || t === "full tola" || t === "1tola") {
-    return TOLA_ML;
-  }
-  if (
-    t.includes("½") ||
-    t.includes("1/2") ||
-    /\bhalf(?:\s|-)?tola\b/.test(t)
-  ) {
-    return HALF_TOLA_ML;
-  }
-  if (
-    t.includes("¼") ||
-    t.includes("1/4") ||
-    /\bquarter(?:\s|-)?tola\b/.test(t)
-  ) {
-    return QUARTER_TOLA_ML;
-  }
+  // A tola fraction that is not an exact approved label (e.g. "1½ Tola") is
+  // ambiguous — never fall through to a partial match.
+  if (/tola/.test(t)) return null;
 
   const mlMatch = t.match(/(\d+(?:\.\d+)?)\s*ml\b/);
   if (mlMatch) {

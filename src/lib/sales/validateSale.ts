@@ -1,15 +1,16 @@
 import mongoose from "mongoose";
-import { resolveDeductMlFromUnitLabel } from "@/lib/format";
+import { resolveDeductMlFromUnitLabel, resolveOilTolaMl } from "@/lib/format";
 import { Formula, Product } from "@/lib/models";
 import {
   OIL_BASE_PRODUCT_ID,
   REFILL_OMR_PER_ML,
   REFILL_CUSTOMER_BOTTLE_ML,
   REMIX_OIL_ML,
+  REMIX_COMPONENT_ROLES,
   REMIX_REQUIRED_ROLES,
   matchRemixRole,
   roleLabel,
-  type RemixRequiredRole,
+  type RemixRole,
 } from "@/lib/sales/constants";
 import { SaleError } from "@/lib/sales/errors";
 
@@ -28,6 +29,8 @@ export type IncomingSaleLine = {
   packagingProductIds?: string[];
   /** BLD-08: reuse a specific (customer) formula instead of the default remix BOM. */
   formulaId?: string;
+  /** POS-069: `{ type: "percent" | "amount", value }` — validated in sales/discount. */
+  discount?: unknown;
 };
 
 export type DeductionNeed = {
@@ -79,14 +82,33 @@ type ProductLean = {
   name: string;
   sku?: string;
   unit: string;
+  category?: string;
   sellPrice: number;
   wholesalePrice?: number;
   stockSellable?: number;
 };
 
+/**
+ * A sellable oil: sold by ml, not packaging/raw stock, and not a remix BOM
+ * role (ethanol / fixative are ml too). Mirrors the POS oil list so the API
+ * can't be used to sell or blend non-oils as "oil".
+ */
+function assertIsOil(product: ProductLean, code: "OIL_NOT_SELECTED" | "INVALID_LINE", context: string) {
+  if (product.unit !== "ml") {
+    throw new SaleError(code, `${context}: selected product must be sold by ml`);
+  }
+  if (product.category === "Packaging" || matchRemixRole(product.name, product.sku)) {
+    throw new SaleError(code, `${context}: ${product.name} is not an oil`);
+  }
+}
+
+/** Sale quantities are whole units (pieces, or N × an approved oil size) — no fractions. */
 function assertPositiveQty(qty: number, label: string) {
-  if (!Number.isFinite(qty) || qty <= 0) {
-    throw new SaleError("INVALID_LINE", `Invalid quantity for ${label}`);
+  if (!Number.isInteger(qty) || qty <= 0) {
+    throw new SaleError(
+      "INVALID_LINE",
+      `Invalid quantity for ${label} — must be a whole number of at least 1`,
+    );
   }
 }
 
@@ -140,7 +162,7 @@ async function validateCustomerBlendSale(
   componentDeductions: DeductionNeed[];
 }> {
   const { lineQty, lineIndex, productsById } = options;
-  const foundRoles = new Map<RemixRequiredRole, FormulaDoc["components"][number]>();
+  const foundRoles = new Map<RemixRole, FormulaDoc["components"][number]>();
   const componentDeductions: DeductionNeed[] = [];
   let oilMl = 0;
   let primaryOil:
@@ -200,7 +222,7 @@ async function validateCustomerBlendSale(
   // Fill missing required roles from the default remix BOM when present.
   const fallback = options.packagingFallback;
   if (fallback) {
-    for (const role of REMIX_REQUIRED_ROLES) {
+    for (const role of REMIX_COMPONENT_ROLES) {
       if (foundRoles.has(role)) continue;
       for (const comp of fallback.components) {
         if (comp.productId === OIL_BASE_PRODUCT_ID) continue;
@@ -265,7 +287,7 @@ export async function validateRemixSale(
   }
 
   const productsById = options.productsById ?? new Map<string, ProductLean>();
-  const foundRoles = new Map<RemixRequiredRole, FormulaDoc["components"][number]>();
+  const foundRoles = new Map<RemixRole, FormulaDoc["components"][number]>();
   let oilComponent: FormulaDoc["components"][number] | undefined;
 
   for (const comp of formula.components) {
@@ -345,19 +367,15 @@ export async function validateRemixSale(
     oilProduct = loaded;
     productsById.set(options.oilProductId, oilProduct);
   }
-  if (oilProduct.unit !== "ml") {
-    throw new SaleError(
-      "OIL_NOT_SELECTED",
-      "Oil not selected: selected product must be sold by ml",
-    );
-  }
+  assertIsOil(oilProduct, "OIL_NOT_SELECTED", "Oil not selected");
 
   const lineQty = options.lineQty;
   const oilMl = oilComponent.qty; // backend-owned; never trust client oilMl
   const componentDeductions: DeductionNeed[] = [];
 
-  for (const role of REMIX_REQUIRED_ROLES) {
-    const comp = foundRoles.get(role)!;
+  for (const role of REMIX_COMPONENT_ROLES) {
+    const comp = foundRoles.get(role);
+    if (!comp) continue; // optional role (label/box/fixative) not in this formula
     componentDeductions.push({
       productId: comp.productId,
       productName: comp.productName,
@@ -367,7 +385,7 @@ export async function validateRemixSale(
     });
   }
 
-  // Also deduct any other valid BOM components (e.g. pouch) outside required roles
+  // Also deduct any other valid BOM components outside the recognised roles
   for (const comp of formula.components) {
     if (comp.productId === OIL_BASE_PRODUCT_ID) continue;
     if (!mongoose.isValidObjectId(comp.productId)) continue;
@@ -516,7 +534,7 @@ export async function validateSaleLines(
       : Promise.resolve(null),
     lineProductIds.length > 0
       ? Product.find({ _id: { $in: lineProductIds } })
-          .select("name sku unit sellPrice wholesalePrice stockSellable")
+          .select("name sku unit category sellPrice wholesalePrice stockSellable")
           .lean<ProductLean[]>()
       : Promise.resolve([] as ProductLean[]),
   ]);
@@ -540,7 +558,7 @@ export async function validateSaleLines(
   }
   if (missingComponentIds.size > 0) {
     const extra = await Product.find({ _id: { $in: [...missingComponentIds] } })
-      .select("name sku unit sellPrice wholesalePrice stockSellable")
+      .select("name sku unit category sellPrice wholesalePrice stockSellable")
       .lean<ProductLean[]>();
     for (const p of extra) productsById.set(String(p._id), p);
   }
@@ -598,18 +616,19 @@ export async function validateSaleLines(
         throw new SaleError("INVALID_LINE", "Product required for oil line");
       }
       const product = requireProduct(productsById, raw.productId);
-      if (product.unit !== "ml") {
-        throw new SaleError("INVALID_LINE", "Oil line product must use ml unit");
-      }
-      const deductMl = resolveDeductMlFromUnitLabel(raw.unitLabel);
+      assertIsOil(product, "INVALID_LINE", "Oil line");
+      // Individual oil is sold only in approved tola sizes (¼ / ½ / 1 tola =
+      // 3 / 6 / 12 ml); larger amounts are qty × size. Arbitrary "N ml" labels
+      // are refused so the deduction can only ever be an approved size.
+      const deductMl = resolveOilTolaMl(raw.unitLabel);
       if (deductMl == null) {
         throw new SaleError(
           "INVALID_LINE",
-          "Oil quantity (ml) is required — use 1 Tola / ½ Tola / ¼ Tola or N ml",
+          "Oil is sold only as 1 Tola / ½ Tola / ¼ Tola (use quantity for more)",
         );
       }
       const unitPrice = Number((product.sellPrice * deductMl).toFixed(3));
-      const unitLabel = raw.unitLabel?.trim() || `${deductMl} ml`;
+      const unitLabel = raw.unitLabel!.trim();
       lines.push({
         productId: raw.productId,
         name: product.name,
@@ -636,9 +655,7 @@ export async function validateSaleLines(
         throw new SaleError("INVALID_LINE", "Oil product required for refill line");
       }
       const product = requireProduct(productsById, raw.productId);
-      if (product.unit !== "ml") {
-        throw new SaleError("INVALID_LINE", "Refill oil product must use ml unit");
-      }
+      assertIsOil(product, "INVALID_LINE", "Refill");
       const deductMl = resolveDeductMlFromUnitLabel(raw.unitLabel);
       if (deductMl == null) {
         throw new SaleError(
@@ -751,6 +768,14 @@ export async function validateSaleLines(
         throw new SaleError("INVALID_LINE", "Remix product required");
       }
       const product = requireProduct(productsById, raw.productId);
+      // The remix price comes from this product, so it must be a Remix
+      // product — otherwise any cheap item could be charged for a full remix BOM.
+      if (product.category !== "Remix") {
+        throw new SaleError(
+          "INVALID_LINE",
+          `${product.name} is not a remix product`,
+        );
+      }
       const resolved = resolvePriceFromProduct(product, "remix");
       const unitPrice = resolved.unitPrice;
       const name = resolved.name;

@@ -7,6 +7,7 @@ export {
   assertStockAvailable,
 } from "@/lib/sales/validateSale";
 export {
+  REMIX_COMPONENT_ROLES,
   REMIX_REQUIRED_ROLES,
   OIL_BASE_PRODUCT_ID,
   REMIX_OIL_ML,

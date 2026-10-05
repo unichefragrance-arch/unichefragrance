@@ -12,6 +12,7 @@ type Body = {
   salesperson?: string;
   payment?: string;
   total?: number;
+  discountTotal?: number;
   lines?: ReceiptLine[];
 };
 
@@ -48,6 +49,7 @@ export async function POST(req: Request) {
       payment: body.payment,
       lines,
       total: body.total,
+      discountTotal: body.discountTotal,
       settings,
     });
 

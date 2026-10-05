@@ -33,7 +33,7 @@ import {
   matchRemixRole,
   OIL_BASE_PRODUCT_ID,
   REMIX_OIL_ML,
-  type RemixRequiredRole,
+  type RemixRole,
 } from "@/lib/sales/constants";
 import type {
   Formula,
@@ -219,6 +219,10 @@ export default function FormulasPage() {
     () => productList.find((p) => matchRemixRole(p.name, p.sku) === "collar"),
     [productList],
   );
+  const pouchProduct = useMemo(
+    () => productList.find((p) => matchRemixRole(p.name, p.sku) === "pouch"),
+    [productList],
+  );
 
   const activeId = selectedId || formulas?.[0]?.id || "";
   const selected = formulas?.find((f) => f.id === activeId);
@@ -277,8 +281,8 @@ export default function FormulasPage() {
   type QuickRole =
     | "oil"
     | Extract<
-        RemixRequiredRole,
-        "ethanol" | "fixative" | "label" | "box" | "bottle" | "cap" | "atomizer" | "collar"
+        RemixRole,
+        "ethanol" | "fixative" | "label" | "box" | "bottle" | "cap" | "atomizer" | "collar" | "pouch"
       >;
 
   function hasRole(role: QuickRole) {
@@ -301,6 +305,7 @@ export default function FormulasPage() {
     cap: capProduct,
     atomizer: atomizerProduct,
     collar: collarProduct,
+    pouch: pouchProduct,
   } as const;
   const packagingDefaultQty: Record<Exclude<QuickRole, "oil">, number> = {
     ethanol: 80,
@@ -311,6 +316,7 @@ export default function FormulasPage() {
     cap: 1,
     atomizer: 1,
     collar: 1,
+    pouch: 1,
   };
   const packagingHints: Record<Exclude<QuickRole, "oil">, string> = {
     ethanol: "No ethanol product in inventory (name/SKU must match ETH- / Ethanol).",
@@ -321,6 +327,7 @@ export default function FormulasPage() {
     cap: "No cap product in inventory (name/SKU must match CAP- / Cap).",
     atomizer: "No atomizer product in inventory (name/SKU must match ATM- / Atomizer).",
     collar: "No collar product in inventory (name/SKU must match COL- / Collar).",
+    pouch: "No pouch product in inventory (name/SKU must match PCH- / Pouch).",
   };
 
   function addQuick(role: QuickRole) {
@@ -361,6 +368,7 @@ export default function FormulasPage() {
       "cap",
       "atomizer",
       "collar",
+      "pouch",
       "label",
       "box",
       "ethanol",
@@ -1220,6 +1228,14 @@ export default function FormulasPage() {
                     onClick={() => addQuick("collar")}
                   >
                     + Collar
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={hasRole("pouch") || !pouchProduct}
+                    onClick={() => addQuick("pouch")}
+                  >
+                    + Pouch
                   </Button>
                   <Button
                     size="sm"

@@ -7,14 +7,19 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx src/lib/sales/run-tests.ts && tsx src/lib/purchases/run-tests.ts && tsx src/lib/reports/run-tests.ts && tsx src/lib/reporting-engine/run-tests.ts && tsx src/app/api/settings/route.test.ts && tsx src/app/api/expenses/route.test.ts",
+    "test": "tsx src/lib/excel/run-tests.ts && tsx src/lib/sales/run-tests.ts && tsx src/lib/sales/run-remix-tests.ts && tsx src/lib/purchases/run-tests.ts && tsx src/lib/reports/run-tests.ts && tsx src/lib/reporting-engine/run-tests.ts && tsx src/app/api/settings/route.test.ts && tsx src/app/api/expenses/route.test.ts",
     "test:e2e": "tsx --env-file=.env src/lib/purchases/run-e2e-tests.ts",
+    "test:e2e:sales": "tsx --env-file=.env src/lib/sales/run-e2e-tests.ts",
+    "test:e2e:fifo": "tsx --env-file=.env src/lib/inventory/run-fifo-tests.ts",
+    "test:load:sales": "tsx --env-file=.env src/lib/sales/run-load-tests.ts",
     "db:seed": "tsx --env-file=.env scripts/seed.ts",
     "db:seed-accountant": "tsx --env-file=.env scripts/seed-accountant-reports.ts",
     "db:health": "tsx --env-file=.env scripts/health.ts",
     "db:migrate-roles": "tsx --env-file=.env scripts/migrate-roles.ts",
     "db:migrate-currency-omr": "tsx --env-file=.env scripts/migrate-currency-omr.ts",
-    "receipt:preview": "tsx scripts/receipt-preview.ts"
+    "db:migrate-sale-branch-ids": "tsx --env-file=.env scripts/migrate-sale-branch-ids.ts",
+    "receipt:preview": "tsx scripts/receipt-preview.ts",
+    "db:wipe": "tsx --env-file=.env scripts/wipe-database.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

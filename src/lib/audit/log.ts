@@ -5,6 +5,7 @@ export type AuditAction =
   | "login_success"
   | "login_failed"
   | "sale_created"
+  | "discount_approved"
   | "purchase_created"
   | "purchase_updated"
   | "stock_adjusted"

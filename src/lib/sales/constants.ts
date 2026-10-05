@@ -1,14 +1,31 @@
-/** Required remix BOM roles (oil is customer-selected separately via oil-base). */
-export const REMIX_REQUIRED_ROLES = [
+/** Every remix BOM component role recognised by name/SKU (oil is selected separately via oil-base). */
+export const REMIX_COMPONENT_ROLES = [
   "bottle",
   "cap",
   "atomizer",
   "collar",
+  "pouch",
   "label",
   "box",
   "ethanol",
   "fixative",
 ] as const;
+
+export type RemixRole = (typeof REMIX_COMPONENT_ROLES)[number];
+
+/**
+ * Approved remix configuration: 20 ml oil + 80 ml ethanol + bottle, cap,
+ * collar, atomizer and pouch. Label / box / fixative are optional — consumed
+ * only when a formula lists them.
+ */
+export const REMIX_REQUIRED_ROLES = [
+  "bottle",
+  "cap",
+  "atomizer",
+  "collar",
+  "pouch",
+  "ethanol",
+] as const satisfies readonly RemixRole[];
 
 export type RemixRequiredRole = (typeof REMIX_REQUIRED_ROLES)[number];
 
@@ -34,11 +51,12 @@ export const REFILL_CHARGEABLE_PACKAGING_ROLES = [
   "pouch",
 ] as const;
 
-const ROLE_PATTERNS: Record<RemixRequiredRole, RegExp[]> = {
+const ROLE_PATTERNS: Record<RemixRole, RegExp[]> = {
   bottle: [/\bbottle\b/i, /^BOT-/i],
   cap: [/\bcap\b/i, /^CAP-/i],
   atomizer: [/\batomizer\b/i, /^ATM-/i],
   collar: [/\bcollar\b/i, /^COL-/i],
+  pouch: [/\bpouch\b/i, /^PCH-/i],
   label: [/\blabel\b/i, /^LBL-/i],
   box: [/\bbox\b/i, /^BOX-/i, /^GB-/i],
   ethanol: [/\bethanol\b/i, /^ETH-/i],
@@ -48,9 +66,9 @@ const ROLE_PATTERNS: Record<RemixRequiredRole, RegExp[]> = {
 export function matchRemixRole(
   productName: string,
   sku?: string,
-): RemixRequiredRole | null {
+): RemixRole | null {
   const haystacks = [productName, sku ?? ""].filter(Boolean);
-  for (const role of REMIX_REQUIRED_ROLES) {
+  for (const role of REMIX_COMPONENT_ROLES) {
     if (
       ROLE_PATTERNS[role].some((re) => haystacks.some((h) => re.test(h)))
     ) {
@@ -60,6 +78,6 @@ export function matchRemixRole(
   return null;
 }
 
-export function roleLabel(role: RemixRequiredRole): string {
+export function roleLabel(role: RemixRole): string {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }

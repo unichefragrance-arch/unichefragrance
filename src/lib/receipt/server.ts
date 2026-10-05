@@ -59,7 +59,7 @@ export async function receiptDocForSale(
   await connectDB();
   const sale = await Sale.findById(saleId)
     .select(
-      "createdAt status customerName customerPhone salesperson payment lines total",
+      "createdAt status customerName customerPhone salesperson payment lines total discountTotal",
     )
     .lean<Record<string, unknown>>();
   if (!sale) return null;
@@ -89,6 +89,7 @@ export async function receiptDocForSale(
     payment: str(sale.payment) || "cash",
     lines,
     total: Number(sale.total ?? 0),
+    discountTotal: Number(sale.discountTotal ?? 0),
     settings,
   });
 }

@@ -2,7 +2,7 @@ import { Formula } from "@/lib/models";
 import {
   matchRemixRole,
   OIL_BASE_PRODUCT_ID,
-  REMIX_REQUIRED_ROLES,
+  REMIX_COMPONENT_ROLES,
 } from "@/lib/sales/constants";
 import type { FormulaComponent } from "@/lib/types";
 
@@ -24,7 +24,8 @@ export async function fillDefaultRemixPackaging(
   const foundRoles = new Set(
     components.map((c) => matchRemixRole(c.productName)).filter(Boolean),
   );
-  const missingRoles = REMIX_REQUIRED_ROLES.filter((r) => !foundRoles.has(r));
+  // Copy every packaging/fill role the template has (required + optional).
+  const missingRoles = REMIX_COMPONENT_ROLES.filter((r) => !foundRoles.has(r));
   if (!missingRoles.length) return components;
 
   const template = await Formula.findOne({

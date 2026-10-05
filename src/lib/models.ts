@@ -42,6 +42,8 @@ const FifoLayerSchema = new Schema(
     supplierName: { type: String, required: true },
     purchaseDate: { type: Date, required: true },
     qtyRemaining: { type: Number, required: true },
+    /** Quantity received into this layer (audit; absent on layers created before it existed). */
+    originalQty: { type: Number },
     unitCost: { type: Number, required: true },
     currency: { type: String, required: true, default: "OMR" },
     /** purchase = goods receipt; production = finished goods from a production order */
@@ -53,6 +55,12 @@ const FifoLayerSchema = new Schema(
     productionOrderId: {
       type: Schema.Types.ObjectId,
       ref: "ProductionOrder",
+      default: null,
+    },
+    /** Purchase order whose goods receipt created this layer (audit trail). */
+    purchaseOrderId: {
+      type: Schema.Types.ObjectId,
+      ref: "PurchaseOrder",
       default: null,
     },
   },
@@ -416,6 +424,10 @@ const SaleLineSchema = new Schema(
     oilMl: Number,
     formulaId: { type: Schema.Types.ObjectId, ref: "Formula" },
     packagingProductIds: [{ type: Schema.Types.ObjectId, ref: "Product" }],
+    /** POS-069: item-level discount as entered + the amount it took off. */
+    discountType: { type: String, enum: ["percent", "amount"] },
+    discountValue: Number,
+    discountAmount: { type: Number, default: 0 },
   },
   { _id: false },
 );
@@ -460,7 +472,26 @@ const SaleSchema = new Schema(
       default: "completed",
     },
     lines: [SaleLineSchema],
+    /** Gross, before discounts. */
     subtotal: { type: Number, required: true },
+    /** POS-070: invoice-level discount, applied after line discounts. */
+    invoiceDiscountType: { type: String, enum: ["percent", "amount"] },
+    invoiceDiscountValue: Number,
+    invoiceDiscountAmount: { type: Number, default: 0 },
+    /** Line + invoice discounts. total = subtotal − discountTotal (revenue for profit). */
+    discountTotal: { type: Number, default: 0 },
+    /** Logged-in user who applied the discount (salesperson is a Settings name, not a login). */
+    discountAppliedBy: {
+      userId: { type: Schema.Types.ObjectId, ref: "User" },
+      name: String,
+      role: String,
+    },
+    /** POS-071: set when the discount exceeded the cashier's limit and was approved. */
+    discountApprovedBy: {
+      userId: { type: Schema.Types.ObjectId, ref: "User" },
+      name: String,
+      role: String,
+    },
     total: { type: Number, required: true },
     saleType: {
       type: String,
@@ -860,6 +891,32 @@ const UserSchema = new Schema(
 
 export const Branch = models.Branch || model("Branch", BranchSchema);
 export const User = models.User || model("User", UserSchema);
+
+/**
+ * POS-072: single-use manager approval for an over-limit discount, bound to
+ * the cashier and a fingerprint of the exact cart. Expires after a few minutes.
+ */
+const DiscountApprovalSchema = new Schema(
+  {
+    token: { type: String, required: true, unique: true },
+    actorUserId: { type: String, required: true },
+    approverUserId: { type: String, required: true },
+    approverName: { type: String, required: true },
+    approverRole: { type: String, required: true },
+    fingerprint: { type: String, required: true },
+    maxDiscountPct: { type: Number, required: true },
+    discountTotal: { type: Number, required: true },
+    expiresAt: { type: Date, required: true },
+    usedAt: { type: Date, default: null },
+    saleId: { type: Schema.Types.ObjectId, ref: "Sale", default: null },
+  },
+  { timestamps: true },
+);
+// Purged 30 days after expiry — each sale keeps its own discountApprovedBy.
+DiscountApprovalSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
+
+export const DiscountApproval =
+  models.DiscountApproval || model("DiscountApproval", DiscountApprovalSchema);
 
 /** Login rate-limit sliding window — one document per key (ip:X or email:X). */
 const RateLimitSchema = new Schema({

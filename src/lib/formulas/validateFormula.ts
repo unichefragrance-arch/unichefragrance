@@ -3,6 +3,7 @@ import {
   OIL_BASE_PRODUCT_ID,
   REMIX_OIL_ML,
   REMIX_REQUIRED_ROLES,
+  type RemixRole,
   roleLabel,
 } from "@/lib/sales/constants";
 import type { FormulaComponent, StockUnit } from "@/lib/types";
@@ -92,13 +93,13 @@ export function validateFormulaInput(input: FormulaValidationInput): string[] {
       }
     }
 
-    // BLD-02: every remix (generic or customer blend) must carry the full
-    // packaging BOM — this is what makes a formula self-contained and
-    // production-ready instead of silently depending on another formula.
+    // BLD-02: every remix (generic or customer blend) must carry the approved
+    // BOM roles (ethanol, bottle, cap, collar, atomizer, pouch) — this is what
+    // makes a formula self-contained and production-ready.
     const foundRoles = new Set(
       components
         .map((c) => matchRemixRole(c.productName))
-        .filter((r): r is (typeof REMIX_REQUIRED_ROLES)[number] => Boolean(r)),
+        .filter((r): r is RemixRole => Boolean(r)),
     );
     const missingRoles = REMIX_REQUIRED_ROLES.filter((r) => !foundRoles.has(r));
     if (missingRoles.length) {

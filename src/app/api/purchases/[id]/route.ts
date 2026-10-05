@@ -61,18 +61,43 @@ export async function PUT(req: Request, ctx: Ctx) {
       if (denied) return denied;
     }
 
-    if (body.date) purchase.date = new Date(body.date);
+    // Received goods already sit in FIFO layers stamped with this PO's date,
+    // cost and qty — those inputs are historical and locked once applied.
+    const lockedError = NextResponse.json(
+      {
+        error:
+          "Received lines are locked: their FIFO layers already exist at the received cost and date. Record a stock adjustment instead.",
+      },
+      { status: 400 },
+    );
+    const anyApplied = purchase.lines.some(
+      (l: LineBody) => (Number(l.qtyFifoApplied) || 0) > 0,
+    );
+    if (body.date) {
+      const nextDate = new Date(body.date);
+      if (anyApplied && nextDate.getTime() !== new Date(purchase.date).getTime()) {
+        return lockedError;
+      }
+      purchase.date = nextDate;
+    }
     if (body.supplierId) purchase.supplierId = body.supplierId;
     if (body.supplierName) purchase.supplierName = body.supplierName;
     if (body.currency) purchase.currency = body.currency;
     if (body.notes !== undefined) purchase.notes = body.notes;
 
-    // Full line replace (preserves qtyFifoApplied when productId+unitCost match by index productId)
+    // Full line replace. qtyFifoApplied is server-owned (never from the client:
+    // resetting it would re-create layers for goods already received).
     if (Array.isArray(body.lines)) {
-      const prevByProduct = new Map(
-        purchase.lines.map((l: LineBody) => [String(l.productId), Number(l.qtyFifoApplied) || 0]),
+      const prevByProduct = new Map<string, { applied: number; unitCost: number }>(
+        purchase.lines.map((l: LineBody): [string, { applied: number; unitCost: number }] => [
+          String(l.productId),
+          {
+            applied: Number(l.qtyFifoApplied) || 0,
+            unitCost: Number(l.unitCost ?? 0),
+          },
+        ]),
       );
-      purchase.lines = (body.lines as LineBody[])
+      const nextLines = (body.lines as LineBody[])
         .map((l) => {
           const qtyOrdered = Number(l.qtyOrdered ?? l.qty ?? 0);
           const productId = String(l.productId);
@@ -82,14 +107,21 @@ export async function PUT(req: Request, ctx: Ctx) {
             sku: String(l.sku || ""),
             qtyOrdered,
             qtyReceived: Number(l.qtyReceived ?? 0),
-            qtyFifoApplied:
-              l.qtyFifoApplied !== undefined
-                ? Number(l.qtyFifoApplied)
-                : prevByProduct.get(productId) ?? 0,
+            qtyFifoApplied: prevByProduct.get(productId)?.applied ?? 0,
             unitCost: Number(l.unitCost ?? 0),
           };
         })
         .filter((l) => l.productId && l.qtyOrdered > 0);
+      // A line that already created FIFO layers keeps its product, unit cost
+      // and at least the received qty those layers were created from.
+      for (const [productId, prev] of prevByProduct) {
+        if (prev.applied <= 0) continue;
+        const next = nextLines.find((l) => l.productId === productId);
+        if (!next || next.unitCost !== prev.unitCost || next.qtyReceived < prev.applied) {
+          return lockedError;
+        }
+      }
+      purchase.lines = nextLines;
       purchase.itemCount = purchase.lines.length;
       purchase.subtotal = purchase.lines.reduce(
         (s: number, l: LineBody) => s + Number(l.qtyOrdered) * Number(l.unitCost),

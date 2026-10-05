@@ -1,13 +1,26 @@
 import mongoose from "mongoose";
 import { connectDB } from "@/lib/db";
 import {
-  deductFifoMany,
-  refreshCostFifo,
-  restoreFifo,
+  applyFifoPlan,
+  planFifoDeductions,
+  withProductLocks,
+  type FifoPlan,
 } from "@/lib/inventory";
 import { AppSettings, Customer, Sale } from "@/lib/models";
 import { loosePhoneRegex, phoneDigits } from "@/lib/phone";
 import { SaleError } from "@/lib/sales/errors";
+import {
+  computeDiscounts,
+  exceedsDiscountLimit,
+  type DiscountBreakdown,
+} from "@/lib/sales/discount";
+import {
+  cartFingerprint,
+  consumeDiscountApproval,
+  verifyDiscountApproval,
+  type DiscountActor,
+  type DiscountApprover,
+} from "@/lib/sales/discountApproval";
 import {
   validateSaleLines,
   type IncomingSaleLine,
@@ -37,6 +50,15 @@ export type CreateSaleInput = {
   salesperson?: string;
   payment: string;
   lines: IncomingSaleLine[];
+  /** POS-070: `{ type: "percent" | "amount", value }` on the bill after line discounts. */
+  invoiceDiscount?: unknown;
+  /** Logged-in user — their role sets the discount limit (POS-071). */
+  actor?: DiscountActor | null;
+  /**
+   * Single-use token from POST /api/sales/discount-approval when the discount
+   * exceeds the actor's limit. Never the manager's password (POS-072 replay).
+   */
+  discountApprovalToken?: string | null;
   status?: "completed" | "held" | "void";
   idempotencyKey?: string;
   /** BRN-08: stamp from session when present */
@@ -133,16 +155,17 @@ export async function resolveCustomerByPhone(
   phone: string,
   givenName: string | undefined,
   update: CustomerTouchUpdate,
+  session?: mongoose.ClientSession,
 ): Promise<mongoose.Types.ObjectId> {
   const digits = phoneDigits(phone);
   const filter =
     digits.length >= 7 ? { phone: { $regex: loosePhoneRegex(digits) } } : { phone };
+  // Inside a transaction the commit carries the write concern, not each op.
+  const writeOpts = session ? { session } : { writeConcern: FAST_WC };
 
-  const existing = await Customer.findOne(filter).select("_id");
+  const existing = await Customer.findOne(filter, null, session ? { session } : {}).select("_id");
   if (existing) {
-    await Customer.updateOne({ _id: existing._id }, update, {
-      writeConcern: FAST_WC,
-    });
+    await Customer.updateOne({ _id: existing._id }, update, writeOpts);
     return existing._id as mongoose.Types.ObjectId;
   }
 
@@ -160,7 +183,7 @@ export async function resolveCustomerByPhone(
       upsert: true,
       returnDocument: "after",
       setDefaultsOnInsert: true,
-      writeConcern: FAST_WC,
+      ...writeOpts,
     },
   );
   if (!created) {
@@ -194,23 +217,25 @@ function coalesceDeductions(
   return [...map.values()];
 }
 
-async function applyDeductions(
+/** Read-only: stock check + FIFO plan + the audit entries the sale will store. */
+async function planDeductions(
   deductions: Awaited<ReturnType<typeof validateSaleLines>>["deductions"],
-): Promise<DeductionAuditEntry[]> {
+  session: mongoose.ClientSession,
+): Promise<{ plan: FifoPlan | null; audit: DeductionAuditEntry[] }> {
   const coalesced = coalesceDeductions(deductions);
-  if (coalesced.length === 0) return [];
+  if (coalesced.length === 0) return { plan: null, audit: [] };
 
-  const byId = await deductFifoMany(
+  const plan = await planFifoDeductions(
     coalesced.map((n) => ({
       productId: n.productId,
       qty: n.qty,
       productName: n.productName,
     })),
-    { skipCostUpdate: true },
+    session,
   );
 
-  return coalesced.map((need) => {
-    const result = byId.get(need.productId) ?? { costTotal: 0, batches: [] };
+  const audit = coalesced.map((need) => {
+    const result = plan.results.get(need.productId) ?? { costTotal: 0, batches: [] };
     return {
       productId: need.productId,
       productName: need.productName,
@@ -221,7 +246,11 @@ async function applyDeductions(
       costTotal: result.costTotal,
     };
   });
+  return { plan, audit };
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 
 function resolveSaleType(lines: ValidatedSaleLine[]) {
   const types = new Set(lines.map((l) => l.lineType));
@@ -254,9 +283,44 @@ function asObjectId(id?: string) {
   return undefined;
 }
 
+/**
+ * Discounts are keyed by the incoming line index (validated lines keep the same
+ * order). `subtotal` may exceed Σ qty × unitPrice (refill packaging is charged
+ * on top) — that remainder is only reachable by the invoice discount.
+ */
+export function discountsFor(
+  lines: ValidatedSaleLine[],
+  rawLines: IncomingSaleLine[],
+  invoiceDiscount: unknown,
+  subtotal: number,
+): DiscountBreakdown {
+  const lineGross = lines.map((l) => l.qty * l.unitPrice);
+  const extraGross = Math.max(0, subtotal - lineGross.reduce((s, g) => s + g, 0));
+  return computeDiscounts(
+    lines.map((_, i) => ({ gross: lineGross[i], discount: rawLines[i]?.discount })),
+    invoiceDiscount,
+    extraGross,
+  );
+}
+
+function discountFields(breakdown: DiscountBreakdown) {
+  return {
+    subtotal: breakdown.subtotal,
+    ...(breakdown.invoiceDiscount
+      ? {
+          invoiceDiscountType: breakdown.invoiceDiscount.type,
+          invoiceDiscountValue: breakdown.invoiceDiscount.value,
+        }
+      : {}),
+    invoiceDiscountAmount: breakdown.invoiceDiscountAmount,
+    discountTotal: breakdown.discountTotal,
+    total: breakdown.total,
+  };
+}
+
 /** Native insert needs ObjectIds — mongoose casting is skipped. */
-function linesForInsert(lines: ValidatedSaleLine[]) {
-  return lines.map((l) => ({
+function linesForInsert(lines: ValidatedSaleLine[], breakdown: DiscountBreakdown) {
+  return lines.map((l, i) => ({
     productId: asObjectId(l.productId),
     name: l.name,
     qty: l.qty,
@@ -273,6 +337,13 @@ function linesForInsert(lines: ValidatedSaleLine[]) {
           .filter((id) => mongoose.isValidObjectId(id))
           .map((id) => new mongoose.Types.ObjectId(id))
       : [],
+    ...(breakdown.lines[i]?.discount
+      ? {
+          discountType: breakdown.lines[i].discount!.type,
+          discountValue: breakdown.lines[i].discount!.value,
+        }
+      : {}),
+    discountAmount: breakdown.lines[i]?.discountAmount ?? 0,
   }));
 }
 
@@ -320,7 +391,8 @@ async function holdSale(input: CreateSaleInput) {
   for (let i = 0; i < input.lines.length; i++) {
     const raw = input.lines[i];
     const qty = Number(raw.qty);
-    if (!Number.isFinite(qty) || qty <= 0) {
+    // Same whole-unit rule as checkout, so a held bill can always be completed.
+    if (!Number.isInteger(qty) || qty <= 0) {
       throw new SaleError("INVALID_LINE", `Invalid quantity for line ${i + 1}`);
     }
     if (!HELD_LINE_TYPES.has(raw.lineType)) {
@@ -347,6 +419,8 @@ async function holdSale(input: CreateSaleInput) {
     });
     subtotal += qty * unitPrice;
   }
+  // Validated (bad input rejected) but not approved — approval happens at checkout.
+  const breakdown = discountsFor(lines, input.lines, input.invoiceDiscount, subtotal);
 
   const givenName = input.customerName?.trim();
   const knownId =
@@ -390,12 +464,13 @@ async function holdSale(input: CreateSaleInput) {
     salesperson,
     payment: normalizePayment(input.payment),
     status: "held" as const,
-    lines: linesForInsert(lines),
-    subtotal,
-    total: subtotal,
+    lines: linesForInsert(lines, breakdown),
+    ...discountFields(breakdown),
     saleType: resolveSaleType(lines),
     inventoryDeductions: [],
-    ...(input.branchId ? { branchId: input.branchId } : {}),
+    ...(asObjectId(input.branchId ?? undefined)
+      ? { branchId: asObjectId(input.branchId ?? undefined) }
+      : {}),
     ...(input.branchName ? { branchName: input.branchName } : {}),
     createdAt: now,
     updatedAt: now,
@@ -416,43 +491,14 @@ async function holdSale(input: CreateSaleInput) {
   };
 }
 
-async function rollbackAudit(audit: DeductionAuditEntry[]) {
-  await Promise.all(
-    audit.map((entry) =>
-      restoreFifo(
-        entry.productId,
-        { costTotal: entry.costTotal, batches: entry.batches },
-        { skipCostUpdate: true },
-      ),
-    ),
-  );
-}
-
-async function rollbackCustomerTotals(
-  customerId: mongoose.Types.ObjectId | null,
-  subtotal: number,
-  payment: string,
-) {
-  if (!customerId) return;
-  await Customer.updateOne(
-    { _id: customerId },
-    {
-      $inc: {
-        totalPurchases: -subtotal,
-        ...(payment === "credit" ? { creditBalance: -subtotal } : {}),
-      },
-    },
-    { writeConcern: FAST_WC },
-  ).catch(() => {
-    /* best-effort */
-  });
-}
-
 /**
- * POS complete — target ≤2s on Atlas:
- * 1) validate (warm formula cache → usually 1 product read)
- * 2) parallel: FIFO deduct (reserve∥layers) + customer touch
- * 3) native Sale.insertOne (skip mongoose doc build)
+ * POS complete — validate, then ONE Mongo transaction for every write:
+ * FIFO stock deduction + customer stats + sale insert commit together or not
+ * at all. A crash or error mid-way can no longer leave stock deducted with no
+ * sale recorded (the old best-effort compensating rollback could).
+ * Inside it: reads + FIFO plan first, then customer + sale, then the hot
+ * product/layer bulk writes last so concurrent sales conflict as little as
+ * possible; conflicts retry with jittered backoff.
  */
 export async function createSale(input: CreateSaleInput) {
   const status = input.status ?? "completed";
@@ -481,158 +527,171 @@ export async function createSale(input: CreateSaleInput) {
     resolveSalesperson(input.salesperson),
     validateSaleLines(input.lines),
   ]);
+  const breakdown = discountsFor(
+    validated.lines,
+    input.lines,
+    input.invoiceDiscount,
+    validated.subtotal,
+  );
+  const actor = input.actor ?? null;
+  const needsApproval =
+    breakdown.discountTotal > 0 && exceedsDiscountLimit(breakdown, actor?.role);
+  const approvalToken = needsApproval ? String(input.discountApprovalToken ?? "") : "";
+  const approver: DiscountApprover | null = needsApproval
+    ? await verifyDiscountApproval(
+        approvalToken,
+        breakdown,
+        actor,
+        cartFingerprint(input.lines, input.invoiceDiscount),
+      )
+    : null;
   const tValidate = Date.now();
 
-  const customerInc = {
-    totalPurchases: validated.subtotal,
-    ...(payment === "credit" ? { creditBalance: validated.subtotal } : {}),
-  };
   const productNames = productNamesFromLines(validated.lines);
+  const customerUpdate: CustomerTouchUpdate = {
+    $set: {
+      lastVisit: new Date(),
+      ...(givenName ? { name: givenName } : {}),
+    },
+    $inc: {
+      totalPurchases: breakdown.total,
+      ...(payment === "credit" ? { creditBalance: breakdown.total } : {}),
+    },
+    // CRM-02/CRM-12: what they bought becomes "Products Requested" automatically.
+    ...(productNames.length > 0
+      ? { $addToSet: { productsRequested: { $each: productNames } } }
+      : {}),
+  };
 
+  const _id = new mongoose.Types.ObjectId();
   let audit: DeductionAuditEntry[] = [];
-  let customerTouched = false;
-  let customerObjectId: mongoose.Types.ObjectId | null = knownCustomerId
-    ? new mongoose.Types.ObjectId(knownCustomerId)
-    : null;
+  let saleDoc: Record<string, unknown> = {};
+  let tStock = tValidate;
 
+  const session = await mongoose.startSession();
   try {
-    if (knownCustomerId && customerObjectId) {
-      // Known customer: fire-and-forget stats update while FIFO runs (no return doc wait).
-      const customerTouch = Customer.updateOne(
-        { _id: customerObjectId },
-        {
-          $set: {
-            lastVisit: new Date(),
-            ...(givenName ? { name: givenName } : {}),
-          },
-          $inc: customerInc,
-          // CRM-02/CRM-12: what they bought becomes "Products Requested" automatically.
-          ...(productNames.length > 0
-            ? { $addToSet: { productsRequested: { $each: productNames } } }
-            : {}),
-        },
-        { writeConcern: FAST_WC },
-      ).then(() => {
-        customerTouched = true;
-      });
-
-      const [deductionAudit] = await Promise.all([
-        validated.deductions.length > 0
-          ? applyDeductions(validated.deductions)
-          : Promise.resolve([] as DeductionAuditEntry[]),
-        customerTouch,
-      ]);
-      audit = deductionAudit;
-    } else {
-      const [deductionAudit, resolvedCustomerId] = await Promise.all([
-        validated.deductions.length > 0
-          ? applyDeductions(validated.deductions)
-          : Promise.resolve([] as DeductionAuditEntry[]),
-        resolveCustomerByPhone(phone, givenName, {
-          $set: {
-            lastVisit: new Date(),
-            ...(givenName ? { name: givenName } : {}),
-          },
-          $inc: customerInc,
-          ...(productNames.length > 0
-            ? { $addToSet: { productsRequested: { $each: productNames } } }
-            : {}),
-        }),
-      ]);
-      audit = deductionAudit;
-      customerTouched = true;
-      customerObjectId = resolvedCustomerId;
-    }
-
-    const tStock = Date.now();
-    const displayName = givenName || "Walk-in";
-    const now = new Date();
-    const _id = new mongoose.Types.ObjectId();
-    const saleDoc = {
-      _id,
-      customerPhone: phone,
-      customerName: displayName,
-      customerId: customerObjectId,
-      salesperson,
-      payment,
-      status,
-      lines: linesForInsert(validated.lines),
-      subtotal: validated.subtotal,
-      total: validated.subtotal,
-      saleType: resolveSaleType(validated.lines),
-      idempotencyKey,
-      inventoryDeductions: auditForInsert(audit),
-      ...(input.branchId ? { branchId: input.branchId } : {}),
-      ...(input.branchName ? { branchName: input.branchName } : {}),
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    try {
-      await Sale.collection.insertOne(saleDoc, { writeConcern: FAST_WC });
-    } catch (err) {
-      if (idempotencyKey && isDuplicateKey(err)) {
-        const dup = await Sale.findOne({ idempotencyKey }).lean();
-        if (dup) {
-          if (audit.length) await rollbackAudit(audit);
-          if (customerTouched) {
-            await rollbackCustomerTotals(customerObjectId, validated.subtotal, payment);
-          }
-          return {
-            sale: { ...dup, id: String(dup._id) },
-            deduplicated: true as const,
-            timingMs: {
-              total: Date.now() - t0,
-              validate: tValidate - t0,
-              stock: tStock - tValidate,
-              insert: Date.now() - tStock,
-            },
-          };
+    // withTransaction retries the callback on transient errors (e.g. write
+    // conflicts), so everything it produces is (re)assigned inside it.
+    let attempt = 0;
+    await withProductLocks(
+      validated.deductions.map((d) => d.productId),
+      () => session.withTransaction(
+      async () => {
+        // Retry after a write conflict: random backoff so concurrent sales
+        // touching the same components don't immediately collide again.
+        if (attempt++ > 0) {
+          await sleep(Math.random() * Math.min(250, 10 * 2 ** attempt));
         }
-      }
-      throw err;
-    }
+        // 1) Reads only — stock check + FIFO plan against this snapshot.
+        const planned = await planDeductions(validated.deductions, session);
+        audit = planned.audit;
 
-    const productIds = [...new Set(audit.map((a) => a.productId))];
-    if (productIds.length > 0) {
-      void refreshCostFifo(productIds).catch(() => {
-        /* non-fatal — after response */
-      });
-    }
+        let customerObjectId: mongoose.Types.ObjectId;
+        if (knownCustomerId) {
+          customerObjectId = new mongoose.Types.ObjectId(knownCustomerId);
+          await Customer.updateOne({ _id: customerObjectId }, customerUpdate, {
+            session,
+          });
+        } else {
+          customerObjectId = await resolveCustomerByPhone(
+            phone,
+            givenName,
+            customerUpdate,
+            session,
+          );
+        }
+        tStock = Date.now();
 
-    const timingMs = {
-      total: Date.now() - t0,
-      validate: tValidate - t0,
-      stock: tStock - tValidate,
-      insert: Date.now() - tStock,
-    };
-    if (timingMs.total > 2000) {
-      console.warn("[createSale] slow POS complete", timingMs);
-    }
-
-    return {
-      sale: { ...saleDoc, id: String(_id) },
-      deduplicated: false as const,
-      timingMs,
-    };
+        const now = new Date();
+        saleDoc = {
+          _id,
+          customerPhone: phone,
+          customerName: givenName || "Walk-in",
+          customerId: customerObjectId,
+          salesperson,
+          payment,
+          status,
+          lines: linesForInsert(validated.lines, breakdown),
+          ...discountFields(breakdown),
+          ...(breakdown.discountTotal > 0 && actor?.userId
+            ? {
+                discountAppliedBy: {
+                  userId: asObjectId(actor.userId),
+                  name: actor.name,
+                  role: actor.role,
+                },
+              }
+            : {}),
+          ...(approver
+            ? {
+                discountApprovedBy: {
+                  userId: new mongoose.Types.ObjectId(approver.userId),
+                  name: approver.name,
+                  role: approver.role,
+                },
+              }
+            : {}),
+          saleType: resolveSaleType(validated.lines),
+          // Omit when absent: the native driver would store null, and the
+          // sparse unique index treats null as a value — so the 2nd keyless
+          // sale would fail with E11000.
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+          inventoryDeductions: auditForInsert(audit),
+          // ObjectId, like every other branch-stamped document — the reports
+          // and branch filters match on ObjectId (a string never matched).
+          ...(asObjectId(input.branchId ?? undefined)
+            ? { branchId: asObjectId(input.branchId ?? undefined) }
+            : {}),
+          ...(input.branchName ? { branchName: input.branchName } : {}),
+          createdAt: now,
+          updatedAt: now,
+        };
+        // Insert before consuming the approval: a duplicate checkout (same
+        // idempotency key) fails here with E11000 and gets the original sale,
+        // instead of failing on an approval its twin already used.
+        await Sale.collection.insertOne(saleDoc, { session });
+        if (approver) await consumeDiscountApproval(approvalToken, _id, session);
+        // 2) Hot stock/layer writes last, just before commit (see planFifoDeductions).
+        if (planned.plan) await applyFifoPlan(planned.plan, session);
+      },
+      // Primary-only commit ack — same latency trade-off as before (FAST_WC).
+      { writeConcern: FAST_WC },
+      ),
+    );
   } catch (err) {
+    // Same idempotency key already committed (double-click / retry): the
+    // transaction aborted, so nothing was deducted twice — return the original.
     if (idempotencyKey && isDuplicateKey(err)) {
       const dup = await Sale.findOne({ idempotencyKey }).lean();
       if (dup) {
-        if (audit.length) await rollbackAudit(audit);
-        if (customerTouched) {
-          await rollbackCustomerTotals(customerObjectId, validated.subtotal, payment);
-        }
         return {
           sale: { ...dup, id: String(dup._id) },
           deduplicated: true as const,
+          timingMs: undefined,
         };
       }
     }
-    if (audit.length) await rollbackAudit(audit);
-    if (customerTouched) {
-      await rollbackCustomerTotals(customerObjectId, validated.subtotal, payment);
-    }
     throw err;
+  } finally {
+    await session.endSession();
   }
+
+  // costFifo was already updated inside the transaction (planFifoDeductions) —
+  // no post-commit write to the same hot product documents.
+
+  const timingMs = {
+    total: Date.now() - t0,
+    validate: tValidate - t0,
+    stock: tStock - tValidate,
+    insert: Date.now() - tStock,
+  };
+  if (timingMs.total > 2000) {
+    console.warn("[createSale] slow POS complete", timingMs);
+  }
+
+  return {
+    sale: { ...saleDoc, id: String(_id) },
+    deduplicated: false as const,
+    timingMs,
+  };
 }

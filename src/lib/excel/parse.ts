@@ -53,7 +53,8 @@ export function parseProductSheet(buffer: ArrayBuffer | Buffer): ExcelProductRow
       if (isEmpty) return null;
 
       return {
-        rowNumber: idx + 2, // header is row 1
+        // SheetJS skips blank rows, so use its 0-based sheet position, not the array index.
+        rowNumber: ((row as { __rowNum__?: number }).__rowNum__ ?? idx + 1) + 1,
         internalCode: cellStr(mapped["Internal Code"]),
         name: cellStr(mapped["Product Name"]),
         category: cellStr(mapped["Category"]),

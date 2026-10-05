@@ -24,8 +24,10 @@ import {
   Plus,
   Minus,
   Package,
+  Tag,
   X,
 } from "lucide-react";
+import { useAuth } from "@/components/auth/AuthProvider";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/ui/Panel";
@@ -43,6 +45,17 @@ import { receiptText } from "@/lib/receipt/text";
 import { renderReceiptHtml } from "@/lib/receipt/template";
 import type { ReceiptFormat, ReceiptLine } from "@/lib/receipt/types";
 import { OIL_BASE_PRODUCT_ID, matchRemixRole } from "@/lib/sales/constants";
+import { resolveSearchPick } from "@/lib/sales/posSearch";
+import {
+  clampDiscount,
+  computeDiscounts,
+  discountAmount,
+  discountLimitFor,
+  exceedsDiscountLimit,
+  parseDiscount,
+  type DiscountInput,
+  type DiscountType,
+} from "@/lib/sales/discount";
 import type {
   AppSettings,
   Customer,
@@ -82,6 +95,8 @@ type HeldSaleLine = {
   deductMl?: number;
   oilProductId?: string;
   formulaId?: string;
+  discountType?: DiscountType;
+  discountValue?: number;
 };
 
 type HeldSale = {
@@ -92,6 +107,8 @@ type HeldSale = {
   payment: string;
   status: string;
   total: number;
+  invoiceDiscountType?: DiscountType;
+  invoiceDiscountValue?: number;
   saleType?: string;
   lines: HeldSaleLine[];
   time?: string;
@@ -103,6 +120,7 @@ type SendChannel = "email" | "whatsapp" | "sms";
 type LastSale = {
   id: string;
   total: number;
+  discountTotal: number;
   customerName: string;
   phone: string;
   email: string;
@@ -135,6 +153,11 @@ const PACKAGING_GROUPS: {
   { id: "other", label: "Other" },
 ];
 
+/** Remix is made to order from its BOM (checkout checks the components) — its own count never blocks a sale. */
+function isOutOfStock(p: Product): boolean {
+  return p.category !== "Remix" && p.stockSellable <= 0;
+}
+
 function packagingGroupOf(product: Product): PackagingGroup {
   const role = matchRemixRole(product.name, product.sku);
   if (
@@ -166,7 +189,126 @@ type CartLine = {
   oilProductName?: string;
   formulaId?: string;
   formulaName?: string;
+  /** POS-069: item-level discount (applied to qty × unitPrice). */
+  discount?: DiscountInput;
 };
+
+function discountFromStored(
+  type: DiscountType | undefined,
+  value: number | undefined,
+): DiscountInput | undefined {
+  return (type === "percent" || type === "amount") && Number(value) > 0
+    ? { type, value: Number(value) }
+    : undefined;
+}
+
+function discountLabel(d: DiscountInput): string {
+  return d.type === "percent" ? `${d.value}%` : formatMoney(d.value);
+}
+
+/** Inline editor for a line or bill discount — rejects bad input before it reaches the cart (POS-075). */
+function DiscountEditor({
+  initial,
+  base,
+  onApply,
+  onCancel,
+}: {
+  initial?: DiscountInput | null;
+  base: number;
+  onApply: (d: DiscountInput | null) => void;
+  onCancel: () => void;
+}) {
+  const [type, setType] = useState<DiscountType>(initial?.type ?? "percent");
+  const [value, setValue] = useState(initial ? String(initial.value) : "");
+  const [error, setError] = useState<string | null>(null);
+
+  function apply() {
+    if (value.trim() === "") {
+      setError("Enter a discount");
+      return;
+    }
+    try {
+      onApply(parseDiscount({ type, value }, base, "Discount"));
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message.replace(/^Discount: /, "") : "Invalid discount",
+      );
+    }
+  }
+
+  return (
+    <div className="mt-1.5 rounded-lg border border-line bg-canvas p-2">
+      <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 overflow-hidden rounded-md border border-line text-[11px] font-semibold">
+          {(["percent", "amount"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => {
+                setType(t);
+                setError(null);
+              }}
+              className={`px-2 py-1 ${type === t ? "bg-ink text-canvas" : "bg-mist text-ink-muted"}`}
+            >
+              {t === "percent" ? "%" : "OMR"}
+            </button>
+          ))}
+        </div>
+        <input
+          type="number"
+          inputMode="decimal"
+          min={0}
+          max={type === "percent" ? 100 : undefined}
+          step="any"
+          autoFocus
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              apply();
+            } else if (e.key === "Escape") {
+              e.stopPropagation();
+              onCancel();
+            }
+          }}
+          aria-label="Discount value"
+          aria-invalid={error ? true : undefined}
+          className="h-7 min-w-0 flex-1 rounded-md border border-line bg-paper px-2 text-sm tabular-nums"
+        />
+        <Button size="sm" className="h-7 px-2.5" onClick={apply}>
+          Apply
+        </Button>
+        <button
+          type="button"
+          onClick={onCancel}
+          aria-label="Cancel"
+          className="shrink-0 text-ink-muted hover:text-ink"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      {error ? <p className="mt-1 text-[11px] text-coral">{error}</p> : null}
+    </div>
+  );
+}
+
+/** Sellable stock of a product the cart already claims (units, or ml for oil/refill) — mirrors applyLocalStockDeduction. */
+function stockClaimed(cart: CartLine[], productId: string): number {
+  let used = 0;
+  for (const l of cart) {
+    if (l.product.id !== productId) continue;
+    if (l.lineType === "ready" || l.lineType === "packaging") used += l.qty;
+    else if ((l.lineType === "oil" || l.lineType === "refill") && l.deductMl) {
+      used += l.deductMl * l.qty;
+    }
+  }
+  return used;
+}
+
 const emptyProducts: Product[] = [];
 const emptyFormulas: Formula[] = [];
 
@@ -230,6 +372,19 @@ function PosPageInner() {
   const [catalogFilter, setCatalogFilter] = useState<CatalogFilter>("all");
   const [toolStrip, setToolStrip] = useState<"packaging" | "quick">("quick");
   const [cart, setCart] = useState<CartLine[]>([]);
+  /** POS-070: bill-level discount, applied after line discounts. */
+  const [invoiceDiscount, setInvoiceDiscount] = useState<DiscountInput | null>(null);
+  /** Which discount editor is open: a cart line key, or "invoice". */
+  const [discountEditor, setDiscountEditor] = useState<string | null>(null);
+  /** POS-071: manager approval prompt for an over-limit discount. */
+  const [approval, setApproval] = useState<{
+    email: string;
+    password: string;
+    error: string | null;
+  } | null>(null);
+  const [approvingDiscount, setApprovingDiscount] = useState(false);
+  const { user } = useAuth();
+  const discountLimit = discountLimitFor(user?.role);
   const [payment, setPayment] = useState<PaymentMethod>("cash");
   const [customerName, setCustomerName] = useState("");
   const [phone, setPhone] = useState("");
@@ -475,11 +630,32 @@ function PosPageInner() {
   }, [inventory, query, catalogFilter]);
 
   const quick = inventory.filter((p) => p.isQuickButton);
+  const quickDuplicateNames = new Set(
+    quick
+      .map((p) => p.name.trim().toLowerCase())
+      .filter((n, i, all) => all.indexOf(n) !== i),
+  );
 
-  const subtotal = cart.reduce((s, l) => s + l.qty * l.unitPrice, 0);
+  // Same math as createSale — clamped so a qty drop can't make a discount invalid.
+  const pricing = useMemo(() => {
+    const lines = cart.map((l) => {
+      const gross = l.qty * l.unitPrice;
+      return { gross, discount: clampDiscount(l.discount, gross) };
+    });
+    const afterLines = lines.reduce(
+      (s, l) => s + l.gross - discountAmount(l.discount, l.gross),
+      0,
+    );
+    const invoice = clampDiscount(invoiceDiscount, afterLines);
+    return { invoice, ...computeDiscounts(lines, invoice) };
+  }, [cart, invoiceDiscount]);
+  const subtotal = pricing.subtotal;
+  const cartTotal = pricing.total;
+  const discountNeedsApproval =
+    pricing.discountTotal > 0 && exceedsDiscountLimit(pricing, user?.role);
   const vatAmount =
-    vatPercent > 0 ? round2(subtotal - subtotal / (1 + vatPercent / 100)) : 0;
-  const netAmount = round2(subtotal - vatAmount);
+    vatPercent > 0 ? round2(cartTotal - cartTotal / (1 + vatPercent / 100)) : 0;
+  const netAmount = round2(cartTotal - vatAmount);
   const itemCount = cart.reduce((s, l) => s + l.qty, 0);
 
   useEffect(() => {
@@ -556,7 +732,21 @@ function PosPageInner() {
     }
   }
 
+  /** Block cart growth past sellable stock (server re-checks at checkout). */
+  function exceedsStock(product: Product, extra: number): boolean {
+    if (stockClaimed(cart, product.id) + extra <= product.stockSellable) {
+      return false;
+    }
+    flash(
+      `Only ${product.stockSellable} ${product.unit} of ${product.name} in stock`,
+      4000,
+      "err",
+    );
+    return true;
+  }
+
   function addReady(product: Product) {
+    if (exceedsStock(product, 1)) return;
     setCart((prev) => {
       const existing = prev.find(
         (l) => l.product.id === product.id && l.lineType === "ready",
@@ -735,6 +925,7 @@ function PosPageInner() {
 
   function addOil(product: Product, unit: "tola" | "half_tola" | "quarter_tola") {
     const ml = tolaToMl(unit);
+    if (exceedsStock(product, ml)) return;
     const label =
       unit === "tola" ? "1 Tola" : unit === "half_tola" ? "½ Tola" : "¼ Tola";
     setCart((prev) => [
@@ -753,7 +944,7 @@ function PosPageInner() {
   }
 
   function addProductSmart(product: Product) {
-    if (product.stockSellable <= 0) {
+    if (isOutOfStock(product)) {
       flash(`${product.name} is out of stock`, 4000, "err");
       return;
     }
@@ -807,6 +998,7 @@ function PosPageInner() {
     if (!oil) {
       return flash("Oil not selected — pick oil for refill", 5000, "err");
     }
+    if (exceedsStock(oil, 100)) return;
     // BLD-09: customer bottle locked to 100ml only (backend also enforces)
     setCart((prev) => [
       ...prev,
@@ -827,6 +1019,15 @@ function PosPageInner() {
 
   function updateQty(key: string, delta: number) {
     const line = cart.find((l) => l.key === key);
+    if (line && delta > 0) {
+      const perUnit =
+        line.lineType === "ready" || line.lineType === "packaging"
+          ? 1
+          : line.lineType === "oil" || line.lineType === "refill"
+            ? line.deductMl ?? 0
+            : 0;
+      if (perUnit > 0 && exceedsStock(line.product, perUnit * delta)) return;
+    }
     const nextQty = line ? Math.max(0, line.qty + delta) : 0;
     if (line?.lineType === "packaging" && nextQty === 0) {
       const group = packagingGroupOf(line.product);
@@ -837,6 +1038,7 @@ function PosPageInner() {
         return next;
       });
     }
+    if (nextQty === 0 && cart.length === 1) resetDiscounts();
     setCart((prev) =>
       prev
         .map((l) => (l.key === key ? { ...l, qty: Math.max(0, l.qty + delta) } : l))
@@ -855,10 +1057,75 @@ function PosPageInner() {
         return next;
       });
     }
+    if (cart.length === 1) resetDiscounts();
     setCart((prev) => prev.filter((l) => l.key !== key));
   }
 
-  async function checkout() {
+  /** Discount fields for the API — the clamped values the cart actually shows. */
+  function linesForApi(lines: CartLine[]) {
+    return lines.map((line) => {
+      const gross = line.qty * line.unitPrice;
+      return {
+        productId: line.product.id,
+        name: line.product.name,
+        qty: line.qty,
+        unitLabel: line.unitLabel,
+        unitPrice: line.unitPrice,
+        lineType: line.lineType,
+        deductMl: line.deductMl,
+        bomNote: line.bomNote,
+        oilProductId: line.oilProductId,
+        formulaId: line.formulaId,
+        discount: clampDiscount(line.discount, gross) ?? undefined,
+      };
+    });
+  }
+
+  /** A bill discount never carries over to the next customer's cart. */
+  function resetDiscounts() {
+    setInvoiceDiscount(null);
+    setDiscountEditor(null);
+  }
+
+  function setLineDiscount(key: string, discount: DiscountInput | null) {
+    setCart((prev) =>
+      prev.map((l) => (l.key === key ? { ...l, discount: discount ?? undefined } : l)),
+    );
+    setDiscountEditor(null);
+  }
+
+  /**
+   * POS-071/072: exchange the manager's credentials for a single-use token
+   * bound to this cart, then complete the sale with only the token.
+   */
+  async function approveAndCheckout(email: string, password: string) {
+    setApprovingDiscount(true);
+    try {
+      const res = await api<{ required: boolean; approvalToken?: string }>(
+        "/api/sales/discount-approval",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            lines: linesForApi(cart),
+            invoiceDiscount: pricing.invoice ?? undefined,
+            email,
+            password,
+          }),
+        },
+      );
+      await checkout(res.approvalToken);
+    } catch (err) {
+      setApproval({
+        email,
+        password: "",
+        error: err instanceof Error ? err.message : "Approval failed",
+      });
+    } finally {
+      setApprovingDiscount(false);
+    }
+  }
+
+  async function checkout(approvalToken?: string) {
     if (cart.length === 0) return;
     if (!salesperson) {
       flash("Set active salesperson in Settings → Sales Team", 6000, "err");
@@ -884,6 +1151,11 @@ function PosPageInner() {
       flash("Refill accepts only 100ml customer bottles (BLD-09)", 6000, "err");
       return;
     }
+    // POS-071: over the role limit → ask for a manager before hitting the server.
+    if (discountNeedsApproval && !approvalToken) {
+      setApproval((prev) => prev ?? { email: "", password: "", error: null });
+      return;
+    }
     setCheckingOut(true);
     const idempotencyKey = createIdempotencyKey();
     const snapshot = {
@@ -894,12 +1166,15 @@ function PosPageInner() {
       email: email.trim(),
       payment,
       salesperson,
-      subtotal,
+      total: cartTotal,
+      discountTotal: pricing.discountTotal,
+      invoiceDiscount: pricing.invoice,
       matchedCustomerId,
       customerMatch,
     };
     // Clear cart immediately (same feel as Hold) — restore if save fails
     setCart([]);
+    resetDiscounts();
     setPackagingPick({});
     setCustomerName("");
     setPhone("");
@@ -917,23 +1192,16 @@ function PosPageInner() {
           salesperson: snapshot.salesperson,
           payment: snapshot.payment,
           idempotencyKey,
-          lines: snapshot.cart.map((line) => ({
-            productId: line.product.id,
-            name: line.product.name,
-            qty: line.qty,
-            unitLabel: line.unitLabel,
-            unitPrice: line.unitPrice,
-            lineType: line.lineType,
-            deductMl: line.deductMl,
-            bomNote: line.bomNote,
-            oilProductId: line.oilProductId,
-            formulaId: line.formulaId,
-          })),
+          lines: linesForApi(snapshot.cart),
+          invoiceDiscount: snapshot.invoiceDiscount ?? undefined,
+          discountApprovalToken: approvalToken,
         }),
       });
+      setApproval(null);
       const completed: LastSale = {
         id: sale.id,
-        total: sale.total ?? snapshot.subtotal,
+        total: sale.total ?? snapshot.total,
+        discountTotal: snapshot.discountTotal,
         customerName: snapshot.customerName,
         phone: snapshot.phone,
         email: snapshot.email,
@@ -948,7 +1216,7 @@ function PosPageInner() {
       };
       setLastSale(completed);
       setSaleDoneOpen(true);
-      flash(`Sale completed · ${formatMoney(snapshot.subtotal)} · ${snapshot.payment}`);
+      flash(`Sale completed · ${formatMoney(completed.total)} · ${snapshot.payment}`);
       // Soft stock refresh — silent so POS does not flash "Loading…"
       applyLocalStockDeduction(snapshot.cart);
       void reloadHeld({ silent: true });
@@ -967,7 +1235,19 @@ function PosPageInner() {
       setPayment(snapshot.payment);
       setCustomerMatch(snapshot.customerMatch);
       setMatchedCustomerId(snapshot.matchedCustomerId);
-      flash(err instanceof Error ? err.message : "Could not complete sale", 6000, "err");
+      setInvoiceDiscount(snapshot.invoiceDiscount);
+      const message = err instanceof Error ? err.message : "Could not complete sale";
+      const code = (err as { data?: { code?: string } }).data?.code;
+      if (code === "DISCOUNT_APPROVAL_REQUIRED" || code === "DISCOUNT_NOT_AUTHORIZED") {
+        // Server limit is the source of truth — prompt even if the client didn't.
+        setApproval((prev) => ({
+          email: prev?.email ?? "",
+          password: "",
+          error: approvalToken ? message : null,
+        }));
+      } else {
+        flash(message, 6000, "err");
+      }
     } finally {
       setCheckingOut(false);
     }
@@ -1065,6 +1345,7 @@ function PosPageInner() {
         oilProductId: oilId,
         oilProductName: oilProduct?.name,
         formulaId,
+        discount: discountFromStored(line.discountType, line.discountValue),
       };
     });
     return { lines, packaging };
@@ -1092,11 +1373,13 @@ function PosPageInner() {
       email,
       cart,
       packagingPick,
+      invoiceDiscount: pricing.invoice,
       matchedCustomerId,
       customerMatch,
     };
     // Clear terminal immediately so the cashier feels instant feedback
     setCart([]);
+    resetDiscounts();
     setPackagingPick({});
     setCustomerName("");
     setPhone("");
@@ -1113,18 +1396,8 @@ function PosPageInner() {
           salesperson: snapshot.salesperson,
           payment: snapshot.payment,
           status: "held",
-          lines: snapshot.cart.map((line) => ({
-            productId: line.product.id,
-            name: line.product.name,
-            qty: line.qty,
-            unitLabel: line.unitLabel,
-            unitPrice: line.unitPrice,
-            lineType: line.lineType,
-            deductMl: line.deductMl,
-            bomNote: line.bomNote,
-            oilProductId: line.oilProductId,
-            formulaId: line.formulaId,
-          })),
+          lines: linesForApi(snapshot.cart),
+          invoiceDiscount: snapshot.invoiceDiscount ?? undefined,
         }),
       });
       setHeldBills((prev) => [held, ...(prev ?? [])]);
@@ -1133,6 +1406,7 @@ function PosPageInner() {
       // Restore cart if save failed
       setCart(snapshot.cart);
       setPackagingPick(snapshot.packagingPick);
+      setInvoiceDiscount(snapshot.invoiceDiscount);
       setCustomerName(snapshot.customerName);
       setPhone(snapshot.phone);
       setCustomerMatch(snapshot.customerMatch);
@@ -1159,6 +1433,9 @@ function PosPageInner() {
     // Optimistic: restore cart + drop from held list immediately
     setCart(lines);
     setPackagingPick(packaging);
+    setInvoiceDiscount(
+      discountFromStored(sale.invoiceDiscountType, sale.invoiceDiscountValue) ?? null,
+    );
     setCustomerName(
       sale.customerName && sale.customerName !== "Walk-in Customer"
         ? sale.customerName
@@ -1179,6 +1456,7 @@ function PosPageInner() {
       flash(`Resumed bill · ${formatMoney(sale.total)}`);
     } catch (err) {
       setCart([]);
+      resetDiscounts();
       setPackagingPick({});
       setCustomerName("");
       setPhone("");
@@ -1238,6 +1516,7 @@ function PosPageInner() {
         payment: sale.payment,
         lines: sale.lines,
         total: sale.total,
+        discountTotal: sale.discountTotal,
         settings: settings.data ?? undefined,
       });
       await printHtmlDocument(renderReceiptHtml(doc, format));
@@ -1281,7 +1560,8 @@ function PosPageInner() {
           customerPhone: phone.trim(),
           salesperson,
           payment,
-          total: subtotal,
+          total: cartTotal,
+          discountTotal: pricing.discountTotal,
           lines: receiptLines(),
         }),
       });
@@ -1323,7 +1603,8 @@ function PosPageInner() {
       salesperson: target?.salesperson || salesperson,
       payment: target ? target.payment : payment,
       lines,
-      total: target ? target.total : subtotal,
+      total: target ? target.total : cartTotal,
+      discountTotal: target ? target.discountTotal : pricing.discountTotal,
       settings: settings.data ?? undefined,
     });
   }
@@ -1417,7 +1698,8 @@ function PosPageInner() {
               customerName: target ? target.customerName : customerName.trim(),
               salesperson: target?.salesperson || salesperson,
               payment: target ? target.payment : payment,
-              total: target ? target.total : subtotal,
+              total: target ? target.total : cartTotal,
+              discountTotal: target ? target.discountTotal : pricing.discountTotal,
               lines,
             }),
           });
@@ -1490,15 +1772,25 @@ function PosPageInner() {
                 onKeyDown={(e) => {
                   if (e.key !== "Enter") return;
                   e.preventDefault();
-                  const first = catalog[0];
-                  if (!first) {
+                  // POS-021: only add when identity is unambiguous (exact SKU,
+                  // single result, or a unique exact name) — never by position.
+                  const pick = resolveSearchPick(catalog, query);
+                  if (pick.kind === "none") {
                     flash("No products match this search", 3000, "err");
                     return;
                   }
-                  addProductSmart(first);
+                  if (pick.kind === "ambiguous") {
+                    flash(
+                      `${pick.count} products match — click the one you want (check SKU / price) or type its SKU`,
+                      4000,
+                      "err",
+                    );
+                    return;
+                  }
+                  addProductSmart(pick.product);
                   setQuery("");
                 }}
-                placeholder="Search name, SKU, category, barcode… · F2 · Enter add · F9 complete"
+                placeholder="Search name, SKU, category… · F2 · Enter add · F9 complete"
                 className="h-11 w-full rounded-full border border-line bg-mist pr-3 pl-10 text-sm outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
               />
             </div>
@@ -1535,9 +1827,12 @@ function PosPageInner() {
               ) : (
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-4">
                   {catalog.map((p) => {
+                    const madeToOrder = p.category === "Remix";
                     const low =
-                      p.lowStockAt > 0 && p.stockSellable <= p.lowStockAt;
-                    const out = p.stockSellable <= 0;
+                      !madeToOrder &&
+                      p.lowStockAt > 0 &&
+                      p.stockSellable <= p.lowStockAt;
+                    const out = isOutOfStock(p);
                     return (
                       <div
                         key={p.id}
@@ -1552,7 +1847,9 @@ function PosPageInner() {
                           >
                             {out
                               ? "Out"
-                              : `${p.stockSellable} ${p.unit}`}
+                              : madeToOrder
+                                ? "Made to order"
+                                : `${p.stockSellable} ${p.unit}`}
                           </Badge>
                           <span className="shrink-0 text-sm font-bold tabular-nums text-ink">
                             {formatMoney(p.sellPrice)}
@@ -1568,6 +1865,7 @@ function PosPageInner() {
                         </p>
                         <p className="mt-0.5 truncate text-xs text-ink-muted">
                           {p.sku} · {p.category}
+                          {p.size ? ` · ${p.size}` : ""}
                         </p>
                         <div className="mt-auto flex gap-1.5 pt-3">
                           {p.unit === "ml" ? (
@@ -1664,7 +1962,7 @@ function PosPageInner() {
                   </p>
                 ) : (
                   quick.map((p) => {
-                    const out = p.stockSellable <= 0;
+                    const out = isOutOfStock(p);
                     return (
                       <button
                         key={p.id}
@@ -1682,6 +1980,10 @@ function PosPageInner() {
                           {p.name}
                         </span>
                         <span className="text-[10px] text-ink-muted">
+                          {/* POS-021: same-name quick buttons must be told apart */}
+                          {quickDuplicateNames.has(p.name.trim().toLowerCase())
+                            ? `${p.sku} · `
+                            : ""}
                           {out
                             ? "Out"
                             : `${formatMoney(p.sellPrice)}${p.unit === "ml" ? "/ml" : ""}`}
@@ -2015,7 +2317,11 @@ function PosPageInner() {
                 Cart is empty — add products or remix
               </div>
             ) : (
-              cart.map((line) => (
+              cart.map((line, index) => {
+                const gross = line.qty * line.unitPrice;
+                const lineDiscount = pricing.lines[index]?.discountAmount ?? 0;
+                const shownDiscount = pricing.lines[index]?.discount ?? null;
+                return (
                 <div
                   key={line.key}
                   className="rounded-lg border border-line/70 bg-mist/30 px-3 py-2"
@@ -2026,6 +2332,7 @@ function PosPageInner() {
                         {line.product.name}
                       </p>
                       <p className="text-xs text-ink-muted">
+                        {line.product.sku ? `${line.product.sku} · ` : ""}
                         {line.unitLabel} · {line.lineType}
                         {line.formulaName
                           ? ` · ${line.formulaName}`
@@ -2066,18 +2373,114 @@ function PosPageInner() {
                       >
                         <Plus className="h-3 w-3" />
                       </button>
+                      <button
+                        type="button"
+                        title="Item discount"
+                        aria-label={`Discount ${line.product.name}`}
+                        aria-expanded={discountEditor === line.key}
+                        className={`ml-1 flex h-7 w-7 items-center justify-center rounded-md border ${
+                          line.discount
+                            ? "border-gold/50 bg-gold/10 text-gold-deep"
+                            : "border-line bg-mist text-ink-muted"
+                        }`}
+                        onClick={() =>
+                          setDiscountEditor((cur) => (cur === line.key ? null : line.key))
+                        }
+                      >
+                        <Tag className="h-3 w-3" />
+                      </button>
                     </div>
-                    <p className="text-base font-bold">
-                      {formatMoney(line.qty * line.unitPrice)}
-                    </p>
+                    <div className="text-right">
+                      {lineDiscount > 0 ? (
+                        <p className="text-[11px] tabular-nums text-ink-muted line-through">
+                          {formatMoney(gross)}
+                        </p>
+                      ) : null}
+                      <p className="text-base font-bold tabular-nums">
+                        {formatMoney(gross - lineDiscount)}
+                      </p>
+                    </div>
                   </div>
+                  {shownDiscount ? (
+                    <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-gold-deep">
+                      <span>
+                        Item discount {discountLabel(shownDiscount)} · −
+                        {formatMoney(lineDiscount)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setLineDiscount(line.key, null)}
+                        aria-label={`Remove discount on ${line.product.name}`}
+                        className="shrink-0 text-ink-muted hover:text-coral"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ) : null}
+                  {discountEditor === line.key ? (
+                    <DiscountEditor
+                      initial={shownDiscount}
+                      base={gross}
+                      onApply={(d) => setLineDiscount(line.key, d)}
+                      onCancel={() => setDiscountEditor(null)}
+                    />
+                  ) : null}
                 </div>
-              ))
+                );
+              })
             )}
           </div>
 
           {/* Fixed footer — always on screen */}
           <div className="shrink-0 border-t border-line/70 pt-3">
+            {!quotationMode && cart.length > 0 ? (
+              <div className="mb-2">
+                {pricing.invoice ? (
+                  <div className="flex items-center justify-between gap-2 text-xs text-gold-deep">
+                    <button
+                      type="button"
+                      onClick={() => setDiscountEditor("invoice")}
+                      className="flex min-w-0 items-center gap-1.5 truncate hover:underline"
+                    >
+                      <Tag className="h-3 w-3 shrink-0" />
+                      Bill discount {discountLabel(pricing.invoice)} · −
+                      {formatMoney(pricing.invoiceDiscountAmount)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInvoiceDiscount(null);
+                        setDiscountEditor(null);
+                      }}
+                      aria-label="Remove bill discount"
+                      className="shrink-0 text-ink-muted hover:text-coral"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ) : discountEditor !== "invoice" ? (
+                  <button
+                    type="button"
+                    onClick={() => setDiscountEditor("invoice")}
+                    className="flex items-center gap-1.5 text-xs font-medium text-ink-muted hover:text-ink"
+                  >
+                    <Tag className="h-3 w-3" />
+                    Add bill discount
+                  </button>
+                ) : null}
+                {discountEditor === "invoice" ? (
+                  <DiscountEditor
+                    initial={pricing.invoice}
+                    base={subtotal - pricing.lineDiscountTotal}
+                    onApply={(d) => {
+                      setInvoiceDiscount(d);
+                      setDiscountEditor(null);
+                    }}
+                    onCancel={() => setDiscountEditor(null)}
+                  />
+                ) : null}
+              </div>
+            ) : null}
             <div className="flex items-end justify-between gap-2">
               <div className="min-w-0 text-[11px] text-ink-muted">
                 {quotationMode ? (
@@ -2092,22 +2495,38 @@ function PosPageInner() {
                   ) : (
                     <p>Subtotal (locked to the quotation&apos;s price)</p>
                   )
-                ) : vatPercent > 0 ? (
-                  <>
-                    <p>
-                      Net {formatMoney(netAmount)} · VAT {vatPercent}%{" "}
-                      {formatMoney(vatAmount)}
-                    </p>
-                    <p className="text-[10px]">Prices include VAT</p>
-                  </>
                 ) : (
-                  <p>Subtotal</p>
+                  <>
+                    {pricing.discountTotal > 0 ? (
+                      <p>
+                        Subtotal {formatMoney(subtotal)} · Discount −
+                        {formatMoney(pricing.discountTotal)}
+                      </p>
+                    ) : null}
+                    {vatPercent > 0 ? (
+                      <>
+                        <p>
+                          Net {formatMoney(netAmount)} · VAT {vatPercent}%{" "}
+                          {formatMoney(vatAmount)}
+                        </p>
+                        <p className="text-[10px]">Prices include VAT</p>
+                      </>
+                    ) : pricing.discountTotal > 0 ? null : (
+                      <p>Subtotal</p>
+                    )}
+                    {discountNeedsApproval ? (
+                      <p className="font-medium text-coral">
+                        {pricing.maxDiscountPct}% discount is over your {discountLimit}%
+                        limit — needs manager approval
+                      </p>
+                    ) : null}
+                  </>
                 )}
               </div>
               <div className="text-right">
                 <p className="text-xs font-semibold uppercase tracking-wide text-ink-muted">Total</p>
                 <p className="font-bold text-3xl tabular-nums leading-none text-ink">
-                  {formatMoney(quotationMode ? quotationMode.total : subtotal)}
+                  {formatMoney(quotationMode ? quotationMode.total : cartTotal)}
                 </p>
               </div>
             </div>
@@ -2202,7 +2621,7 @@ function PosPageInner() {
             >
               {completingQuotation
                 ? "Completing…"
-                : `Complete Sale · ${formatMoney(quotationMode ? quotationMode.total : subtotal)}`}
+                : `Complete Sale · ${formatMoney(quotationMode ? quotationMode.total : cartTotal)}`}
             </Button>
             {!quotationMode ? (
               <p className="mt-1 text-center text-[10px] text-ink-muted">
@@ -2309,6 +2728,87 @@ function PosPageInner() {
           </div>
         </Panel>
       </div>
+
+      {approval ? (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-ink/45 p-4 sm:items-center"
+          onClick={() => !checkingOut && !approvingDiscount && setApproval(null)}
+        >
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="discount-approval-title"
+            className="animate-fade-up w-full max-w-sm rounded-2xl border border-line bg-canvas p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !checkingOut && !approvingDiscount) setApproval(null);
+            }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!approval.email.trim() || !approval.password) {
+                setApproval({ ...approval, error: "Enter the approver's email and password" });
+                return;
+              }
+              void approveAndCheckout(approval.email.trim(), approval.password);
+            }}
+          >
+            <h3 id="discount-approval-title" className="font-semibold text-lg text-ink">
+              Manager approval
+            </h3>
+            <p className="mt-1 text-sm text-ink-muted">
+              {pricing.maxDiscountPct}% discount (−{formatMoney(pricing.discountTotal)}) is over
+              your {discountLimit}% limit. A manager or owner must approve it.
+            </p>
+            <label className="mt-3 block text-xs font-medium text-ink-muted">
+              Approver email
+              <input
+                type="email"
+                autoComplete="off"
+                autoFocus
+                value={approval.email}
+                onChange={(e) => setApproval({ ...approval, email: e.target.value, error: null })}
+                className="mt-1 h-9 w-full rounded-lg border border-line bg-paper px-3 text-sm text-ink"
+              />
+            </label>
+            <label className="mt-2 block text-xs font-medium text-ink-muted">
+              Password
+              <input
+                type="password"
+                autoComplete="off"
+                value={approval.password}
+                onChange={(e) =>
+                  setApproval({ ...approval, password: e.target.value, error: null })
+                }
+                className="mt-1 h-9 w-full rounded-lg border border-line bg-paper px-3 text-sm text-ink"
+              />
+            </label>
+            {approval.error ? (
+              <p role="alert" className="mt-2 text-xs text-coral">
+                {approval.error}
+              </p>
+            ) : null}
+            <div className="mt-4 flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={checkingOut || approvingDiscount}
+                onClick={() => setApproval(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                variant="gold"
+                size="sm"
+                disabled={checkingOut || approvingDiscount}
+              >
+                {checkingOut || approvingDiscount ? "Approving…" : "Approve & complete"}
+              </Button>
+            </div>
+          </form>
+        </div>
+      ) : null}
 
       {saleDoneOpen && lastSale ? (
         <div

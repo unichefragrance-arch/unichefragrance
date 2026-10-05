@@ -5,12 +5,8 @@ import {
   isAuthBootstrapped,
 } from "@/lib/auth/bootstrap";
 import { mapUserPublic } from "@/lib/auth/mapUser";
-import { verifyPassword } from "@/lib/auth/password";
-import {
-  checkLoginRateLimit,
-  clearLoginAttempts,
-  recordFailedLogin,
-} from "@/lib/auth/rateLimit";
+import { verifyPasswordAsync } from "@/lib/auth/password";
+import { clearLoginAttempts, reserveLoginAttempt } from "@/lib/auth/rateLimit";
 import { RATE_LIMIT, WARN_REMAINING } from "@/lib/auth/rateLimitConfig";
 import { permissionsForRole, ROLE_LABELS } from "@/lib/auth/roles";
 import { recordAudit } from "@/lib/audit/log";
@@ -57,9 +53,10 @@ async function loginHandler(req: Request) {
     await ensureAuthBootstrap();
   }
 
-  // Rate limit check and user lookup run in parallel — zero extra latency.
+  // Reserve an attempt atomically BEFORE checking the password, so parallel
+  // guesses can't outrun the lockout. Runs alongside the user lookup.
   const [rl, user] = await Promise.all([
-    checkLoginRateLimit(email),
+    reserveLoginAttempt(email),
     User.findOne({ email })
       .select("name email passwordHash role roleLabel branchId branchName active")
       .lean(),
@@ -75,16 +72,16 @@ async function loginHandler(req: Request) {
     );
   }
 
+  // Async scrypt keeps the event loop free for other requests.
   const credentialsOk =
     user &&
     user.active !== false &&
-    verifyPassword(password, user.passwordHash as string);
+    (await verifyPasswordAsync(password, user.passwordHash as string));
 
   if (!credentialsOk) {
-    void recordFailedLogin(email);
     recordAudit({ action: "login_failed", entityType: "User", email, req });
 
-    const remaining = Math.max(0, rl.remaining - 1);
+    const remaining = rl.remaining;
     return NextResponse.json(
       {
         error: "Invalid email or password.",

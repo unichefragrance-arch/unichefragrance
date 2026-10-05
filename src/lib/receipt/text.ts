@@ -15,6 +15,9 @@ export function receiptText(doc: ReceiptDoc): string {
     "",
     ...(items.length > 0 ? items : ["• (no line items)"]),
     "",
+    doc.discountTotal > 0
+      ? `Discount: -${money(doc.discountTotal, currency)}`
+      : null,
     doc.vatPercent > 0 ? `Subtotal: ${money(doc.subtotal, currency)}` : null,
     doc.vatPercent > 0
       ? `VAT ${doc.vatPercent}%: ${money(doc.vatAmount, currency)}`

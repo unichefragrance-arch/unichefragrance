@@ -2,12 +2,13 @@ import { randomBytes } from "crypto";
 import mongoose from "mongoose";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
-import { deductFifoMany, refreshCostFifo } from "@/lib/inventory";
+import { applyFifoPlan, planFifoDeductions, withProductLocks } from "@/lib/inventory";
 import { Customer, Quotation, Sale } from "@/lib/models";
 import { computeQuotationTotals } from "@/lib/quotation/calc";
 import { normalizeQuotationLines } from "@/lib/quotation/lines";
 import { FAST_WC, resolveCustomerByPhone } from "@/lib/sales";
 import { SaleError } from "@/lib/sales/errors";
+import { validateSaleLines, type IncomingSaleLine } from "@/lib/sales/validateSale";
 import { toJSON } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { assertBranchAccess } from "@/lib/auth/guards";
@@ -330,37 +331,27 @@ export async function POST(req: Request, ctx: Ctx) {
         packagingProductIds: line.packagingProductIds,
       }));
 
-      // Deduct real stock before touching the customer/sale — a POS-driven convert
-      // is a real checkout, not just a paper record. Lines without a catalog
-      // product (e.g. a custom remix blend, which has no oil/formula captured at
-      // quotation time) are skipped here, same as before this change.
-      const deductable = lines.filter(
-        (l: { productId?: unknown; qty: number }) => l.productId,
-      ) as Array<{ productId: mongoose.Types.ObjectId; qty: number; name: string }>;
-      const deductions = await deductFifoMany(
-        deductable.map((l) => ({
-          productId: String(l.productId),
-          qty: l.qty,
-          productName: l.name,
-        })),
-      );
-      const inventoryDeductions = deductable.map((l, i) => {
-        const result = deductions.get(String(l.productId)) ?? { costTotal: 0, batches: [] };
-        return {
-          productId: l.productId,
-          productName: l.name,
-          qty: l.qty,
-          reason: "quotation_convert",
-          lineIndex: i,
-          costTotal: result.costTotal,
-          batches: result.batches.map((b) => ({
-            layerId: new mongoose.Types.ObjectId(b.layerId),
-            qty: b.qty,
-            unitCost: b.unitCost,
-            purchaseDate: b.purchaseDate,
-          })),
-        };
-      });
+      // Stock deduction uses the same rules as a POS checkout: plain catalog
+      // lines (ready / wholesale / packaging) deduct qty in the product's unit;
+      // oil / remix / refill lines go through validateSaleLines so tola → ml
+      // and remix BOMs apply (a "1 Tola" line must take 12 ml, not 1).
+      // Lines without a catalog product (e.g. a custom blend with no formula
+      // captured at quotation time) are skipped, same as before.
+      type ConvertLine = { productId?: unknown; qty: number; name: string; lineType: string };
+      const catalogLines = (lines as ConvertLine[]).filter((l) => l.productId);
+      const PLAIN = new Set(["ready", "wholesale", "packaging"]);
+      const needs: { productId: string; qty: number; productName: string }[] = catalogLines
+        .filter((l) => PLAIN.has(l.lineType))
+        .map((l) => ({ productId: String(l.productId), qty: Number(l.qty), productName: l.name }));
+      const ruled = catalogLines.filter((l) => !PLAIN.has(l.lineType));
+      if (ruled.length > 0) {
+        const validated = await validateSaleLines(
+          ruled.map((l) => ({ ...(l as object), productId: String(l.productId) }) as IncomingSaleLine),
+        );
+        for (const d of validated.deductions) {
+          needs.push({ productId: d.productId, qty: d.qty, productName: d.productName });
+        }
+      }
 
       // CRM-02: a converted quotation is a real order — the customer must show up
       // in Customers with this purchase, same as a POS checkout does (createSale()).
@@ -378,79 +369,108 @@ export async function POST(req: Request, ctx: Ctx) {
           ? { $addToSet: { productsRequested: { $each: productNames } } }
           : {}),
       };
-      let customerObjectId = quotation.customerId;
-      if (customerObjectId) {
-        await Customer.updateOne({ _id: customerObjectId }, customerTouch, {
-          writeConcern: FAST_WC,
-        });
-      } else {
-        customerObjectId = await resolveCustomerByPhone(
-          quotation.customerPhone,
-          quotation.customerName,
-          customerTouch,
-        );
-        quotation.customerId = customerObjectId;
-      }
 
-      // Perf: skip mongoose's Sale.create()/quotation.save() (full-document
-      // validation + default majority write concern) — insert the sale natively
-      // and patch just the changed quotation fields, both at primary-only ack,
-      // and run them in parallel since neither write depends on the other.
       const saleId = new mongoose.Types.ObjectId();
       const now = new Date();
-      const saleDoc = {
-        _id: saleId,
-        customerPhone: quotation.customerPhone,
-        customerName: quotation.customerName,
-        customerId: customerObjectId,
-        salesperson: access?.name || "Quotation Conversion",
-        payment,
-        status: "completed",
-        saleType: "Wholesale",
-        subtotal: quotation.subtotal,
-        total: quotation.total,
-        lines,
-        inventoryDeductions,
-        ...(access?.branchId
-          ? { branchId: new mongoose.Types.ObjectId(access.branchId) }
-          : {}),
-        ...(access?.branchName ? { branchName: access.branchName } : {}),
-        createdAt: now,
-        updatedAt: now,
-      };
-
       const historyEntry = {
         at: now,
         by: access?.name || "System",
         action: "converted",
         detail: String(saleId),
       };
+      let saleDoc: Record<string, unknown> = {};
+      let customerObjectId = quotation.customerId;
 
+      // One transaction (same as POS checkout): FIFO deduction, customer
+      // stats, the sale and the quotation status commit together or not at
+      // all, queued per product with other stock consumers.
+      const session = await mongoose.startSession();
+      try {
+        await withProductLocks(
+          needs.map((n) => n.productId),
+          () =>
+            session.withTransaction(async () => {
+              const plan = await planFifoDeductions(needs, session);
+              const inventoryDeductions = [...plan.results.entries()].map(
+                ([productId, result], i) => ({
+                  productId: new mongoose.Types.ObjectId(productId),
+                  productName: needs.find((n) => n.productId === productId)?.productName,
+                  qty: result.batches.reduce((s, b) => s + b.qty, 0),
+                  reason: "quotation_convert",
+                  lineIndex: i,
+                  costTotal: result.costTotal,
+                  batches: result.batches.map((b) => ({
+                    layerId: new mongoose.Types.ObjectId(b.layerId),
+                    qty: b.qty,
+                    unitCost: b.unitCost,
+                    purchaseDate: b.purchaseDate,
+                  })),
+                }),
+              );
+
+              customerObjectId = quotation.customerId;
+              if (customerObjectId) {
+                await Customer.updateOne({ _id: customerObjectId }, customerTouch, { session });
+              } else {
+                customerObjectId = await resolveCustomerByPhone(
+                  quotation.customerPhone,
+                  quotation.customerName,
+                  customerTouch,
+                  session,
+                );
+              }
+
+              saleDoc = {
+                _id: saleId,
+                customerPhone: quotation.customerPhone,
+                customerName: quotation.customerName,
+                customerId: customerObjectId,
+                salesperson: access?.name || "Quotation Conversion",
+                payment,
+                status: "completed",
+                saleType: "Wholesale",
+                subtotal: quotation.subtotal,
+                total: quotation.total,
+                lines,
+                inventoryDeductions,
+                ...(access?.branchId
+                  ? { branchId: new mongoose.Types.ObjectId(access.branchId) }
+                  : {}),
+                ...(access?.branchName ? { branchName: access.branchName } : {}),
+                createdAt: now,
+                updatedAt: now,
+              };
+              await Sale.collection.insertOne(saleDoc, { session });
+
+              // Only an approved, not-yet-converted quotation converts — two
+              // simultaneous converts can't both deduct stock.
+              const marked = await Quotation.updateOne(
+                { _id: quotation._id, status: "approved", convertedToSaleId: null },
+                {
+                  $set: {
+                    convertedToSaleId: saleId,
+                    status: "converted",
+                    ...(customerObjectId ? { customerId: customerObjectId } : {}),
+                  },
+                  $push: { history: historyEntry },
+                },
+                { session },
+              );
+              if (marked.matchedCount !== 1) {
+                throw new SaleError("VALIDATION", "Quotation already converted");
+              }
+
+              await applyFifoPlan(plan, session);
+            }),
+        );
+      } finally {
+        await session.endSession();
+      }
+
+      quotation.customerId = customerObjectId;
       quotation.convertedToSaleId = saleId;
       quotation.status = "converted";
       quotation.history.push(historyEntry);
-
-      await Promise.all([
-        Sale.collection.insertOne(saleDoc, { writeConcern: FAST_WC }),
-        Quotation.updateOne(
-          { _id: quotation._id },
-          {
-            $set: {
-              convertedToSaleId: saleId,
-              status: "converted",
-              ...(quotation.customerId ? { customerId: quotation.customerId } : {}),
-            },
-            $push: { history: historyEntry },
-          },
-          { writeConcern: FAST_WC },
-        ),
-      ]);
-
-      if (deductable.length > 0) {
-        void refreshCostFifo(deductable.map((l) => String(l.productId))).catch(() => {
-          /* non-fatal — after response */
-        });
-      }
 
       return NextResponse.json({
         quotation: mapQuote(toJSON(quotation)!),

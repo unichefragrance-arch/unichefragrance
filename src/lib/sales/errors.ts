@@ -6,6 +6,9 @@ export type SaleErrorCode =
   | "INVALID_LINE"
   | "PRODUCT_NOT_FOUND"
   | "DUPLICATE_CHECKOUT"
+  | "INVALID_DISCOUNT"
+  | "DISCOUNT_APPROVAL_REQUIRED"
+  | "DISCOUNT_NOT_AUTHORIZED"
   | "VALIDATION";
 
 export class SaleError extends Error {

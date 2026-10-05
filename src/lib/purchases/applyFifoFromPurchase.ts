@@ -10,6 +10,7 @@ export type PurchaseLineForFifo = {
 };
 
 export type PurchaseForFifo = {
+  _id?: { toString(): string } | string;
   supplierId: { toString(): string } | string;
   supplierName: string;
   date: Date;
@@ -57,6 +58,7 @@ export async function applyFifoFromPurchase(
       qty: delta,
       unitCost: Number(line.unitCost) || 0,
       currency: po.currency || "OMR",
+      purchaseOrderId: po._id ? String(po._id) : null,
     });
     line.qtyFifoApplied = applied + delta;
     touched.push(productId);

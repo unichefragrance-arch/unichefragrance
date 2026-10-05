@@ -6,6 +6,7 @@ import { SaleError } from "@/lib/sales/errors";
 import { warmSaleCaches } from "@/lib/sales/validateSale";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { canViewCostPrices } from "@/lib/auth/roles";
 import { recordAudit } from "@/lib/audit/log";
 import { escapeRegex, loosePhoneRegex, phoneDigits } from "@/lib/phone";
 
@@ -108,6 +109,22 @@ export async function POST(req: Request) {
     if (access !== null && isAuthResponse(access)) return access;
 
     const body = await req.json();
+    // Wholesale lines are charged at wholesalePrice — a cost-tier figure roles
+    // like cashier may not even see — so they must not be able to apply it.
+    const hasWholesaleLine =
+      Array.isArray(body.lines) &&
+      body.lines.some(
+        (l: { lineType?: unknown }) => l?.lineType === "wholesale",
+      );
+    if (hasWholesaleLine && (!access || !canViewCostPrices(access.role))) {
+      return NextResponse.json(
+        {
+          error: "Permission denied: wholesale pricing is not allowed for your role.",
+          code: "VALIDATION",
+        },
+        { status: 403 },
+      );
+    }
     const headerKey = req.headers.get("idempotency-key") || undefined;
     const { sale, deduplicated, timingMs } = await createSale({
       customerPhone: body.customerPhone,
@@ -116,6 +133,11 @@ export async function POST(req: Request) {
       salesperson: body.salesperson,
       payment: body.payment,
       lines: body.lines,
+      invoiceDiscount: body.invoiceDiscount,
+      actor: access
+        ? { userId: access.userId, name: access.name, role: access.role }
+        : null,
+      discountApprovalToken: body.discountApprovalToken,
       status: body.status,
       idempotencyKey: body.idempotencyKey || headerKey,
       branchId: access?.branchId ?? undefined,
@@ -123,12 +145,24 @@ export async function POST(req: Request) {
     });
 
     if (!deduplicated) {
+      const saleRec = sale as {
+        discountTotal?: number;
+        discountApprovedBy?: { name?: string };
+      };
+      const discountNote =
+        (saleRec.discountTotal ?? 0) > 0
+          ? ` · discount ${saleRec.discountTotal}${
+              saleRec.discountApprovedBy?.name
+                ? ` approved by ${saleRec.discountApprovedBy.name}`
+                : ""
+            }`
+          : "";
       recordAudit({
         session: access,
         action: "sale_created",
         entityType: "Sale",
         entityId: String((sale as { id?: string; _id?: unknown }).id ?? (sale as { _id?: unknown })._id ?? ""),
-        detail: `${body.customerName || body.customerPhone || "walk-in"} · ${body.payment || ""}`,
+        detail: `${body.customerName || body.customerPhone || "walk-in"} · ${body.payment || ""}${discountNote}`,
         req,
       });
     }
@@ -144,7 +178,19 @@ export async function POST(req: Request) {
   } catch (error) {
     const message =
       safeErrorMessage(error, "Failed to create sale");
-    const status = error instanceof SaleError ? 400 : 400;
+    // Client mistakes (business rules, malformed JSON, bad ids) → 400;
+    // anything else (DB outage, bug) is a server failure → 500.
+    const isClientError =
+      error instanceof SaleError ||
+      error instanceof SyntaxError ||
+      (error instanceof Error &&
+        (error.name === "ValidationError" || error.name === "CastError"));
+    // POS-071/072: over-limit discount needs approval / approval refused → 403.
+    const isDiscountDenied =
+      error instanceof SaleError &&
+      (error.code === "DISCOUNT_APPROVAL_REQUIRED" ||
+        error.code === "DISCOUNT_NOT_AUTHORIZED");
+    const status = isDiscountDenied ? 403 : isClientError ? 400 : 500;
     return NextResponse.json(
       {
         error: message,
