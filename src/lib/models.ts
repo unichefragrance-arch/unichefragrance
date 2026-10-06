@@ -790,6 +790,8 @@ const ProductionOrderSchema = new Schema(
       default: "draft",
       index: true,
     },
+    /** Set while one request completes the order — stops concurrent completions double-consuming stock. */
+    completingAt: { type: Date, default: null },
     oilProductId: { type: Schema.Types.ObjectId, ref: "Product" },
     oilProductName: String,
     outputProductId: {
@@ -863,10 +865,19 @@ const InventoryAdjustmentSchema = new Schema(
     /** BRN-08 branch isolation */
     branchId: { type: Schema.Types.ObjectId, ref: "Branch", index: true },
     branchName: String,
+    /** Client key per submission (scoped to the user) — a resent request is applied once. */
+    idempotencyKey: String,
+    idempotencyOwner: String,
+    /** True while the stock movement for this keyed request is still running. */
+    pending: Boolean,
   },
   { timestamps: true },
 );
 InventoryAdjustmentSchema.index({ createdAt: -1 });
+InventoryAdjustmentSchema.index(
+  { idempotencyOwner: 1, idempotencyKey: 1 },
+  { unique: true, partialFilterExpression: { idempotencyKey: { $type: "string" } } },
+);
 InventoryAdjustmentSchema.index({ productId: 1, createdAt: -1 });
 
 export const InventoryAdjustment =

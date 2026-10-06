@@ -52,6 +52,100 @@ function normalizeReason(
   return "adjustment";
 }
 
+function isDuplicateKey(err: unknown): boolean {
+  return (err as { code?: number } | null)?.code === 11000;
+}
+
+/**
+ * Claim an idempotency key BEFORE moving stock: the adjustment record is
+ * written first (pending) under a unique (owner, key) index, so a resent
+ * request — lost response, retry — can never apply the movement twice.
+ * Returns the claim id, or a ready response for a duplicate.
+ */
+async function claimAdjustment(input: {
+  key: string;
+  owner: string;
+  product: { _id: mongoose.Types.ObjectId; name: string; stockSellable: number; costFifo?: number };
+  qty: number;
+  direction: "in" | "out";
+  reason: AdjustmentReason;
+  createdBy?: string;
+  branchStamp: Record<string, unknown>;
+}): Promise<{ id: mongoose.Types.ObjectId } | { response: NextResponse }> {
+  try {
+    const claim = await InventoryAdjustment.create({
+      productId: input.product._id,
+      productName: input.product.name,
+      qty: input.qty,
+      direction: input.direction,
+      reason: input.reason,
+      createdBy: input.createdBy,
+      idempotencyKey: input.key,
+      idempotencyOwner: input.owner,
+      pending: true,
+      ...input.branchStamp,
+    });
+    return { id: claim._id };
+  } catch (err) {
+    if (!isDuplicateKey(err)) throw err;
+  }
+  const existing = await InventoryAdjustment.findOne({
+    idempotencyOwner: input.owner,
+    idempotencyKey: input.key,
+  }).lean<{
+    _id: mongoose.Types.ObjectId;
+    productId: mongoose.Types.ObjectId;
+    qty: number;
+    direction: string;
+    reason: string;
+    pending?: boolean;
+    costTotal?: number;
+    expenseId?: mongoose.Types.ObjectId;
+  }>();
+  if (!existing) {
+    // The first attempt failed and released the key in between — let the client retry.
+    return { response: NextResponse.json({ error: "Please try again.", code: "RETRY" }, { status: 409 }) };
+  }
+  if (
+    String(existing.productId) !== String(input.product._id) ||
+    existing.qty !== input.qty ||
+    existing.direction !== input.direction
+  ) {
+    return {
+      response: NextResponse.json(
+        { error: "This request key was already used for a different adjustment.", code: "IDEMPOTENCY_MISMATCH" },
+        { status: 409 },
+      ),
+    };
+  }
+  if (existing.pending) {
+    return {
+      response: NextResponse.json(
+        { error: "This adjustment is still being saved — refresh in a moment.", code: "IN_PROGRESS" },
+        { status: 409 },
+      ),
+    };
+  }
+  // Already applied: answer with the original outcome and today's stock.
+  const now = await Product.findById(input.product._id).select("stockSellable costFifo").lean<{ stockSellable?: number; costFifo?: number }>();
+  const stockSellable = Number(now?.stockSellable ?? 0);
+  return {
+    response: NextResponse.json({
+      ok: true,
+      deduplicated: true,
+      direction: existing.direction,
+      reason: existing.reason,
+      qty: existing.qty,
+      costTotal: existing.costTotal,
+      expenseId: existing.expenseId ? String(existing.expenseId) : undefined,
+      adjustmentId: String(existing._id),
+      stockSellable,
+      warnings: [] as string[],
+      product: { id: String(input.product._id), stockSellable, costFifo: Number(now?.costFifo) || 0 },
+    }),
+  };
+}
+
 /**
  * INV-06 / INV-07: inventory adjustment.
  * - wastage_cost: FIFO out + expense (other wasted products = cost)
@@ -79,6 +173,11 @@ export async function POST(req: Request) {
       direction === "in" ? "in" : "out",
     );
     const notes = body.notes ? String(body.notes).trim() : "";
+    const rawKey = body.idempotencyKey;
+    if (rawKey !== undefined && rawKey !== null && typeof rawKey !== "string") {
+      return NextResponse.json({ error: "idempotencyKey must be a string" }, { status: 400 });
+    }
+    const idemKey = typeof rawKey === "string" && rawKey.trim() ? rawKey.trim().slice(0, 200) : null;
     // Who did it comes from the session — never from the request body.
     const createdBy = access?.name || undefined;
 
@@ -248,6 +347,15 @@ export async function POST(req: Request) {
     // ——— INV-07: other wastage = cost (FIFO out + expense) ———
     if (direction === "out") {
       const stockBefore = Number(product.stockSellable) || 0;
+      const outReason: AdjustmentReason = reason === "wastage_cost" ? "wastage_cost" : "adjustment";
+      let claimId: mongoose.Types.ObjectId | undefined;
+      if (idemKey) {
+        const claim = await claimAdjustment({ key: idemKey, owner: access?.userId ?? "system", product, qty, direction: "out", reason: outReason, createdBy, branchStamp });
+        if ("response" in claim) return claim.response;
+        claimId = claim.id;
+      }
+      const releaseClaim = () =>
+        claimId ? InventoryAdjustment.deleteOne({ _id: claimId }).catch(() => undefined) : undefined;
 
       // Fast path: deductFifoMany already enforces sellable + FIFO (no pre-check RTT).
       let costTotal = 0;
@@ -259,6 +367,7 @@ export async function POST(req: Request) {
           (map.get(productId)?.costTotal ?? 0).toFixed(3),
         );
       } catch (err) {
+        await releaseClaim();
         if (err instanceof SaleError) {
           return NextResponse.json(
             {
@@ -276,6 +385,13 @@ export async function POST(req: Request) {
       let expenseId: string | undefined;
       let adjustmentId: string | undefined;
 
+      // With a key, the claimed record becomes the adjustment; otherwise create it.
+      const saveAdjustment = async (fields: Record<string, unknown>) => {
+        if (!claimId) return InventoryAdjustment.create({ ...fields, ...branchStamp });
+        await InventoryAdjustment.updateOne({ _id: claimId }, { $set: fields, $unset: { pending: 1 } });
+        return { _id: claimId };
+      };
+
       if (reason === "wastage_cost") {
         const [expense, adjustment] = await Promise.all([
           Expense.create({
@@ -290,7 +406,7 @@ export async function POST(req: Request) {
             status: "approved",
             ...branchStamp,
           }),
-          InventoryAdjustment.create({
+          saveAdjustment({
             productId: product._id,
             productName: product.name,
             qty,
@@ -301,7 +417,6 @@ export async function POST(req: Request) {
             notes:
               notes || "Other wasted product recorded as cost",
             createdBy,
-            ...branchStamp,
           }),
         ]);
         expenseId = String(expense._id);
@@ -312,7 +427,7 @@ export async function POST(req: Request) {
           { $set: { expenseId: expense._id } },
         ).exec();
       } else {
-        const adjustment = await InventoryAdjustment.create({
+        const adjustment = await saveAdjustment({
           productId: product._id,
           productName: product.name,
           qty,
@@ -321,7 +436,6 @@ export async function POST(req: Request) {
           costTotal,
           notes: notes || "Stock adjustment out",
           createdBy,
-          ...branchStamp,
         });
         adjustmentId = String(adjustment._id);
       }
@@ -356,25 +470,36 @@ export async function POST(req: Request) {
     }
 
     // direction === "in" — admin restock via adjustment layer
-    const supplierId = await adjustmentSupplierId();
+    let inClaimId: mongoose.Types.ObjectId | undefined;
+    if (idemKey) {
+      const claim = await claimAdjustment({ key: idemKey, owner: access?.userId ?? "system", product, qty, direction: "in", reason: "restock", createdBy, branchStamp });
+      if ("response" in claim) return claim.response;
+      inClaimId = claim.id;
+    }
+    let layer: Awaited<ReturnType<typeof addFifoLayer>>;
+    try {
+      const supplierId = await adjustmentSupplierId();
 
+      const unitCost = Number(body.unitCost);
+      layer = await addFifoLayer({
+        productId,
+        supplierId,
+        supplierName: ADJUSTMENT_SUPPLIER,
+        purchaseDate: new Date(),
+        qty,
+        unitCost: Number.isFinite(unitCost) && unitCost >= 0
+          ? unitCost
+          : Number(product.costFifo) || 0,
+        currency: "OMR",
+      });
+    } catch (err) {
+      if (inClaimId) await InventoryAdjustment.deleteOne({ _id: inClaimId }).catch(() => undefined);
+      throw err;
+    }
     const stockBefore = Number(product.stockSellable) || 0;
     const stockAfter = stockBefore + qty;
 
-    const unitCost = Number(body.unitCost);
-    const layer = await addFifoLayer({
-      productId,
-      supplierId,
-      supplierName: ADJUSTMENT_SUPPLIER,
-      purchaseDate: new Date(),
-      qty,
-      unitCost: Number.isFinite(unitCost) && unitCost >= 0
-        ? unitCost
-        : Number(product.costFifo) || 0,
-      currency: "OMR",
-    });
-
-    const adjustment = await InventoryAdjustment.create({
+    const inFields = {
       productId: product._id,
       productName: product.name,
       qty,
@@ -383,8 +508,10 @@ export async function POST(req: Request) {
       costTotal: 0,
       notes: notes || "Restock adjustment",
       createdBy,
-      ...branchStamp,
-    });
+    };
+    const adjustment = inClaimId
+      ? (await InventoryAdjustment.updateOne({ _id: inClaimId }, { $set: inFields, $unset: { pending: 1 } }), { _id: inClaimId })
+      : await InventoryAdjustment.create({ ...inFields, ...branchStamp });
 
     recordAudit({
       session: access,

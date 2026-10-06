@@ -3,6 +3,7 @@ import { connectDB } from "@/lib/db";
 import { defaultLowStockAt } from "@/lib/inventory/stockCheck";
 import { setSellableStock, StockAdjustmentError } from "@/lib/inventory/stockAdjustment";
 import { Product } from "@/lib/models";
+import { escapeRegex } from "@/lib/phone";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { canViewCostPrices, redactCostFields } from "@/lib/auth/roles";
@@ -21,10 +22,12 @@ export async function GET(req: Request) {
     const filter: Record<string, unknown> = {};
     if (category && category !== "All") filter.category = category;
     if (q) {
+      // Search text is literal: "(" or "*" must not be read as regex syntax.
+      const safe = escapeRegex(q);
       filter.$or = [
-        { name: { $regex: q, $options: "i" } },
-        { sku: { $regex: q, $options: "i" } },
-        { category: { $regex: q, $options: "i" } },
+        { name: { $regex: safe, $options: "i" } },
+        { sku: { $regex: safe, $options: "i" } },
+        { category: { $regex: safe, $options: "i" } },
       ];
     }
     const products = await Product.find(filter).sort({ name: 1 }).lean();

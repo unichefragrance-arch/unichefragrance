@@ -40,13 +40,20 @@ function adminEmail(): string {
 }
 
 function sessionSecret(): string {
-  return (
+  const secret =
     process.env.FORMULA_ADMIN_SECRET ||
     process.env.ADMIN_PASSWORD ||
     process.env.FORMULA_ADMIN_PASSWORD ||
     process.env.IMPORT_ADMIN_PASSWORD ||
-    "unich-formula-dev-secret"
-  );
+    process.env.SESSION_SECRET;
+  if (secret) return secret;
+  // A known default would let anyone forge the formula-admin cookie.
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "FORMULA_ADMIN_SECRET is not set. Refusing to sign formula-admin cookies with an insecure default in production.",
+    );
+  }
+  return "unich-formula-dev-secret";
 }
 
 export function getConfiguredAdminEmail(): string {

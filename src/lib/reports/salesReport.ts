@@ -1,4 +1,5 @@
 import * as XLSX from "xlsx";
+import { roundMoney } from "@/lib/money";
 import { Sale } from "@/lib/models";
 import {
   formatPeriodLabel,
@@ -68,27 +69,53 @@ function mapSale(s: Record<string, unknown>): SaleReportRow {
   };
 }
 
-function summarize(sales: SaleReportRow[]): SaleReportSummary {
+/**
+ * Summary over EVERY sale in the range (database aggregation) — not just the
+ * rows returned, which are capped by `limit`. Labels match mapSale().
+ */
+async function summarizeRange(match: Record<string, unknown>): Promise<SaleReportSummary> {
+  const groups = await Sale.aggregate<{
+    _id: { payment?: unknown; type?: unknown };
+    count: number;
+    total: number;
+  }>([
+    // Aggregation skips schema casting (a string branchId would match
+    // nothing) — cast the filter exactly as find() does.
+    { $match: Sale.find(match).cast(Sale) },
+    {
+      $group: {
+        _id: { payment: "$payment", type: "$saleType" },
+        count: { $sum: 1 },
+        total: { $sum: { $ifNull: ["$total", 0] } },
+      },
+    },
+  ]);
+
   const byPayment: SaleReportSummary["byPayment"] = {};
   const byType: SaleReportSummary["byType"] = {};
   let total = 0;
-
-  for (const sale of sales) {
-    total += sale.total;
-    const pay = sale.payment || "Unknown";
-    const type = sale.type || "Retail";
+  let count = 0;
+  for (const g of groups) {
+    const rawPay = typeof g._id.payment === "string" ? g._id.payment : String(g._id.payment ?? "");
+    const pay = (rawPay.charAt(0).toUpperCase() + rawPay.slice(1)) || "Unknown";
+    const type = String(g._id.type || "Retail");
+    total += g.total;
+    count += g.count;
     byPayment[pay] = byPayment[pay] || { count: 0, total: 0 };
-    byPayment[pay].count += 1;
-    byPayment[pay].total += sale.total;
+    byPayment[pay].count += g.count;
+    byPayment[pay].total += g.total;
     byType[type] = byType[type] || { count: 0, total: 0 };
-    byType[type].count += 1;
-    byType[type].total += sale.total;
+    byType[type].count += g.count;
+    byType[type].total += g.total;
+  }
+  for (const bucket of [byPayment, byType]) {
+    for (const v of Object.values(bucket)) v.total = roundMoney(v.total);
   }
 
   return {
-    count: sales.length,
-    total,
-    avgTicket: sales.length ? total / sales.length : 0,
+    count,
+    total: roundMoney(total),
+    avgTicket: count ? roundMoney(total / count) : 0,
     byPayment,
     byType,
   };
@@ -105,14 +132,15 @@ export async function buildSaleReport(opts: {
   const { start, end } = getPeriodRange(opts.period, opts.anchor);
   const limit = Math.min(Math.max(opts.limit ?? 500, 1), 2000);
 
-  const docs = await Sale.find({
+  const match = {
     status: opts.status,
     createdAt: { $gte: start, $lte: end },
     ...(opts.branchFilter ? { $and: [opts.branchFilter] } : {}),
-  })
-    .sort({ createdAt: -1 })
-    .limit(limit)
-    .lean();
+  };
+  const [docs, summary] = await Promise.all([
+    Sale.find(match).sort({ createdAt: -1 }).limit(limit).lean(),
+    summarizeRange(match),
+  ]);
 
   const sales = toJSONList(docs).map((s) => mapSale(s as Record<string, unknown>));
 
@@ -122,7 +150,7 @@ export async function buildSaleReport(opts: {
     label: formatPeriodLabel(opts.period, start, end),
     from: start.toISOString(),
     to: end.toISOString(),
-    summary: summarize(sales),
+    summary,
     sales,
   };
 }

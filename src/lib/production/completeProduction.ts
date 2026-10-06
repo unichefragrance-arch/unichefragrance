@@ -169,14 +169,14 @@ export async function completeProductionOrder(
     throw new SaleError("VALIDATION", "Invalid production order id");
   }
 
-  const order = await ProductionOrder.findById(orderId);
-  if (!order) {
+  const current = await ProductionOrder.findById(orderId);
+  if (!current) {
     throw new SaleError("VALIDATION", "Production order not found");
   }
-  if (order.status === "completed") {
+  if (current.status === "completed") {
     throw new SaleError("VALIDATION", "Production order already completed");
   }
-  if (order.status === "cancelled") {
+  if (current.status === "cancelled") {
     throw new SaleError("VALIDATION", "Cancelled production orders cannot be completed");
   }
 
@@ -191,7 +191,7 @@ export async function completeProductionOrder(
   let yieldInfo: YieldVarianceResult;
   try {
     yieldInfo = assertYieldWithinTolerance(
-      Number(order.yieldMl),
+      Number(current.yieldMl),
       Number(opts.actualYieldMl),
     );
   } catch (err) {
@@ -201,109 +201,142 @@ export async function completeProductionOrder(
     );
   }
 
-  applyYieldFields(order, yieldInfo);
-
-  // ml/g finished goods: stock added equals actual yield
-  const unit = String(order.outputUnit || "");
-  if (unit === "ml" || unit === "g") {
-    order.outputQty = yieldInfo.actualYieldMl;
+  // Claim the order atomically BEFORE moving stock: concurrent completions
+  // (double click, two tabs) would otherwise each consume materials and add
+  // output, with only the final save colliding. A claim older than
+  // CLAIM_STALE_MS (crashed request) may be taken over.
+  const order = await ProductionOrder.findOneAndUpdate(
+    {
+      _id: current._id,
+      status: "draft",
+      $or: [
+        { completingAt: null },
+        { completingAt: { $lt: new Date(Date.now() - CLAIM_STALE_MS) } },
+      ],
+    },
+    { $set: { completingAt: new Date() } },
+    { returnDocument: "after" },
+  );
+  if (!order) {
+    throw new SaleError(
+      "VALIDATION",
+      "Production order is already being completed or was completed",
+    );
   }
-
-  const needs = (order.plannedLines as PlannedLine[]).map((l) => ({
-    productId: String(l.productId),
-    productName: l.productName,
-    qty: Number(l.qty),
-  }));
-
-  let deductMap: Map<string, DeductFifoResult>;
   try {
-    deductMap = await deductFifoMany(needs, { skipCostUpdate: false });
-  } catch (err) {
-    if (err instanceof SaleError) throw err;
-    throw err;
-  }
+    applyYieldFields(order, yieldInfo);
 
-  const consumption = (order.plannedLines as PlannedLine[]).map((l) => {
-    const result = deductMap.get(String(l.productId)) ?? {
-      costTotal: 0,
-      batches: [],
-    };
-    return {
-      productId: l.productId,
+    // ml/g finished goods: stock added equals actual yield
+    const unit = String(order.outputUnit || "");
+    if (unit === "ml" || unit === "g") {
+      order.outputQty = yieldInfo.actualYieldMl;
+    }
+
+    const needs = (order.plannedLines as PlannedLine[]).map((l) => ({
+      productId: String(l.productId),
       productName: l.productName,
       qty: Number(l.qty),
-      reason: l.reason,
-      costTotal: Number(result.costTotal.toFixed(3)),
-      batches: result.batches.map((b) => ({
-        layerId: b.layerId,
-        qty: b.qty,
-        unitCost: b.unitCost,
-        purchaseDate: b.purchaseDate,
-      })),
-    };
-  });
+    }));
 
-  const totalMaterialCost = Number(
-    consumption.reduce((s, c) => s + c.costTotal, 0).toFixed(3),
-  );
-  const unitCost = Number(
-    (totalMaterialCost / Math.max(order.outputQty, 1e-9)).toFixed(3),
-  );
+    let deductMap: Map<string, DeductFifoResult>;
+    try {
+      deductMap = await deductFifoMany(needs, { skipCostUpdate: false });
+    } catch (err) {
+      if (err instanceof SaleError) throw err;
+      throw err;
+    }
 
-  const batchNumber = newBatchNumber();
-  const producedAt = new Date();
-
-  let layerId: string | undefined;
-  try {
-    const supplier = await ensureProductionSupplier();
-    const layer = await addProductionFifoLayer({
-      productId: String(order.outputProductId),
-      supplierId: String(supplier._id),
-      supplierName: `${PRODUCTION_SUPPLIER_NAME} · ${batchNumber}`,
-      productionOrderId: String(order._id),
-      purchaseDate: producedAt,
-      qty: order.outputQty,
-      unitCost,
-      currency: "OMR",
+    const consumption = (order.plannedLines as PlannedLine[]).map((l) => {
+      const result = deductMap.get(String(l.productId)) ?? {
+        costTotal: 0,
+        batches: [],
+      };
+      return {
+        productId: l.productId,
+        productName: l.productName,
+        qty: Number(l.qty),
+        reason: l.reason,
+        costTotal: Number(result.costTotal.toFixed(3)),
+        batches: result.batches.map((b) => ({
+          layerId: b.layerId,
+          qty: b.qty,
+          unitCost: b.unitCost,
+          purchaseDate: b.purchaseDate,
+        })),
+      };
     });
-    layerId = String(layer._id);
-  } catch (err) {
-    // Roll back material deductions if finished-goods layer fails
-    await Promise.all(
-      consumption.map((c) =>
-        restoreFifo(String(c.productId), {
-          costTotal: c.costTotal,
-          batches: c.batches.map((b) => ({
-            layerId: String(b.layerId),
-            qty: b.qty,
-            unitCost: b.unitCost,
-            purchaseDate: b.purchaseDate,
-          })),
-        }),
-      ),
+
+    const totalMaterialCost = Number(
+      consumption.reduce((s, c) => s + c.costTotal, 0).toFixed(3),
     );
+    const unitCost = Number(
+      (totalMaterialCost / Math.max(order.outputQty, 1e-9)).toFixed(3),
+    );
+
+    const batchNumber = newBatchNumber();
+    const producedAt = new Date();
+
+    let layerId: string | undefined;
+    try {
+      const supplier = await ensureProductionSupplier();
+      const layer = await addProductionFifoLayer({
+        productId: String(order.outputProductId),
+        supplierId: String(supplier._id),
+        supplierName: `${PRODUCTION_SUPPLIER_NAME} · ${batchNumber}`,
+        productionOrderId: String(order._id),
+        purchaseDate: producedAt,
+        qty: order.outputQty,
+        unitCost,
+        currency: "OMR",
+      });
+      layerId = String(layer._id);
+    } catch (err) {
+      // Roll back material deductions if finished-goods layer fails
+      await Promise.all(
+        consumption.map((c) =>
+          restoreFifo(String(c.productId), {
+            costTotal: c.costTotal,
+            batches: c.batches.map((b) => ({
+              layerId: String(b.layerId),
+              qty: b.qty,
+              unitCost: b.unitCost,
+              purchaseDate: b.purchaseDate,
+            })),
+          }),
+        ),
+      );
+      throw err;
+    }
+
+    order.status = "completed";
+    order.consumption = consumption;
+    order.batch = {
+      batchNumber,
+      producedAt,
+      outputProductId: order.outputProductId,
+      outputProductName: order.outputProductName,
+      outputSku: order.outputSku,
+      outputQty: order.outputQty,
+      outputUnit: order.outputUnit,
+      unitCost,
+      totalMaterialCost,
+      fifoLayerId: layerId
+        ? new mongoose.Types.ObjectId(layerId)
+        : undefined,
+    };
+    order.completedAt = producedAt;
+    order.completedBy = opts.completedBy;
+    order.completingAt = null;
+    await order.save();
+
+    return order;
+  } catch (err) {
+    await ProductionOrder.updateOne(
+      { _id: order._id, status: "draft" },
+      { $set: { completingAt: null } },
+    ).catch(() => undefined);
     throw err;
   }
-
-  order.status = "completed";
-  order.consumption = consumption;
-  order.batch = {
-    batchNumber,
-    producedAt,
-    outputProductId: order.outputProductId,
-    outputProductName: order.outputProductName,
-    outputSku: order.outputSku,
-    outputQty: order.outputQty,
-    outputUnit: order.outputUnit,
-    unitCost,
-    totalMaterialCost,
-    fifoLayerId: layerId
-      ? new mongoose.Types.ObjectId(layerId)
-      : undefined,
-  };
-  order.completedAt = producedAt;
-  order.completedBy = opts.completedBy;
-  await order.save();
-
-  return order;
 }
+
+const CLAIM_STALE_MS = 2 * 60 * 1000;

@@ -7,6 +7,7 @@ import {
   validateImportRows,
   type ExistingProductRef,
 } from "@/lib/excel/validate";
+import { defaultLowStockAt } from "@/lib/inventory/stockCheck";
 import { ImportBatch, Product } from "@/lib/models";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
@@ -185,7 +186,14 @@ export async function POST(req: Request) {
             stockTester: 0,
             stockSample: 0,
             stockPersonal: 0,
-            lowStockAt: 0,
+            // Same ALT-01 default as POST /api/products, so imported products
+            // raise low-stock alerts like manually created ones.
+            lowStockAt: defaultLowStockAt({
+              unit: String(payload.unit || "pcs"),
+              category: String(payload.category || ""),
+              itemType: payload.itemType ? String(payload.itemType) : undefined,
+              name: String(payload.name || ""),
+            }),
             importBatchId: batchId,
           });
           row.createdProductId = created._id;

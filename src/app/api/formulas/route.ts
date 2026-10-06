@@ -13,6 +13,7 @@ import {
 import { fillDefaultRemixPackaging } from "@/lib/formulas/defaultPackaging";
 import { validateFormulaInput } from "@/lib/formulas/validateFormula";
 import { Formula } from "@/lib/models";
+import { escapeRegex } from "@/lib/phone";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
@@ -57,11 +58,13 @@ export async function GET(req: Request) {
     if (customerId) filter.customerId = customerId;
     if (status) filter.status = status;
     if (q) {
+      // Search text is literal: "(" or "*" must not be read as regex syntax.
+      const safe = escapeRegex(q);
       filter.$or = [
-        { name: { $regex: q, $options: "i" } },
-        { customerName: { $regex: q, $options: "i" } },
-        { notes: { $regex: q, $options: "i" } },
-        { type: { $regex: q, $options: "i" } },
+        { name: { $regex: safe, $options: "i" } },
+        { customerName: { $regex: safe, $options: "i" } },
+        { notes: { $regex: safe, $options: "i" } },
+        { type: { $regex: safe, $options: "i" } },
       ];
     }
 

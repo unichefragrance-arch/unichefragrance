@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Customer, Expense, Product, Sale, Supplier } from "@/lib/models";
+import { salesByTender } from "@/lib/reports/tenders";
 import { moduleRoadmap } from "@/lib/constants";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { hasPermission } from "@/lib/auth/roles";
@@ -298,10 +299,9 @@ export async function GET(req: Request) {
     const receivableCustomers = await Customer.find({
       creditBalance: { $gt: 0 },
     }).sort({ creditBalance: -1 });
-    const accountsReceivable =
-      Math.round(
-        receivableCustomers.reduce((s, c) => s + (c.creditBalance || 0), 0) * 100,
-      ) / 100;
+    const accountsReceivable = roundMoney(
+      receivableCustomers.reduce((s, c) => s + (c.creditBalance || 0), 0),
+    );
     const topReceivables = receivableCustomers.slice(0, 5).map((c) => ({
       id: String(c._id),
       name: c.name,
@@ -311,17 +311,26 @@ export async function GET(req: Request) {
     const payableSuppliers = await Supplier.find({
       outstanding: { $gt: 0 },
     }).sort({ outstanding: -1 });
-    const accountsPayable =
-      Math.round(
-        payableSuppliers.reduce((s, sup) => s + (sup.outstanding || 0), 0) * 100,
-      ) / 100;
+    const accountsPayable = roundMoney(
+      payableSuppliers.reduce((s, sup) => s + (sup.outstanding || 0), 0),
+    );
     const topPayables = payableSuppliers.slice(0, 5).map((sup) => ({
       id: String(sup._id),
       name: sup.name,
       balance: roundMoney((sup.outstanding || 0)),
     }));
 
-    const netCash = roundMoney((todayTotal - todayExpenseTotal));
+    // Cash in the drawer: cash taken today (incl. the cash part of mixed
+    // payments) less today's expenses — card/bank/credit never reach it.
+    const todayTenders = await salesByTender({
+      status: "completed",
+      createdAt: { $gte: startOfToday },
+      ...branchFilter,
+    });
+    const todayPaidExpenses = todayExpenses
+      .filter((e) => e.status !== "rejected")
+      .reduce((s, e) => s + e.amount, 0);
+    const netCash = roundMoney(todayTenders.byTender.cash.amount - todayPaidExpenses);
 
     const alerts = [
       ...(canInventory

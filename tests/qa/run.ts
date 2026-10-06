@@ -30,6 +30,8 @@ const SUITES = [
   "inventory",
   "pos-142b-status", // POS-142b: client cannot choose a stock-consuming sale status
   "pos-hardening", // idempotency, payment/qty/body validation, remix oil, data integrity
+  "workflows", // back office end to end: users, purchases, stock, formulas, production, expenses, import, reports
+  "product-import", // Excel → ImportBatch (stage) → products (commit) → API → Inventory/POS UI
 ];
 
 assertLocalDb();

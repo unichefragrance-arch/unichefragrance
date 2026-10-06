@@ -47,6 +47,12 @@ export default function InventoryPage() {
   const [brand, setBrand] = useState("All");
   const [productId, setProductId] = useState("All");
   const [saving, setSaving] = useState(false);
+  /**
+   * One key per adjustment, kept until the server answers: pressing Save
+   * again after a lost response resends the same key, so the server applies
+   * the stock movement once. A changed form gets a new key.
+   */
+  const adjustKeyRef = useRef<{ sig: string; key: string } | null>(null);
   const [exportingValuation, setExportingValuation] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [staging, setStaging] = useState<ImportBatchSummary | null>(null);
@@ -335,6 +341,11 @@ export default function InventoryPage() {
       if (reason === "wastage_customer") {
         payload.customerId = customerId;
       }
+      const sig = JSON.stringify(payload);
+      if (adjustKeyRef.current?.sig !== sig) {
+        adjustKeyRef.current = { sig, key: createAdjustmentKey() };
+      }
+      payload.idempotencyKey = adjustKeyRef.current.key;
 
       const res = await fetch("/api/inventory/adjustments", {
         method: "POST",
@@ -343,6 +354,7 @@ export default function InventoryPage() {
         body: JSON.stringify(payload),
       });
       const data = (await res.json()) as {
+        code?: string;
         error?: string;
         expenseId?: string;
         saleId?: string;
@@ -355,6 +367,11 @@ export default function InventoryPage() {
         } | null;
       };
 
+      // The server answered, so this submission is settled — unless it is
+      // still being applied (keep the key so a retry can't double it).
+      if (!(res.status === 409 && (data.code === "IN_PROGRESS" || data.code === "RETRY"))) {
+        adjustKeyRef.current = null;
+      }
       if (!res.ok) {
         patchSellable(productId, before);
         throw new Error(
@@ -1538,4 +1555,10 @@ function MiniStat({ label, value }: { label: string; value: string }) {
       <p className="mt-0.5 text-lg font-semibold text-ink">{value}</p>
     </div>
   );
+}
+
+function createAdjustmentKey() {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `adj-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }

@@ -172,7 +172,7 @@ export default function DashboardPage() {
           <Stat
             label="Net Cash"
             value={formatMoney(stats.netCash ?? 0)}
-            hint="today · sales less expenses"
+            hint="today · cash taken less expenses"
           />
         )}
       </div>
