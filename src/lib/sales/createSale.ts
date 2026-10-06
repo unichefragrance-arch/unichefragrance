@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import mongoose from "mongoose";
 import { connectDB } from "@/lib/db";
 import {
@@ -55,9 +56,10 @@ export type CreateSaleInput = {
   /** Known CRM id from POS phone match — skips customer upsert round-trip wait. */
   customerId?: string;
   salesperson?: string;
-  payment: string;
+  /** Validated by normalizePayment — absent means cash. */
+  payment: unknown;
   /** Required when payment === "mixed" — per-method amounts that must sum to the total. */
-  paymentBreakdown?: PaymentSplitInput[];
+  paymentBreakdown?: unknown[];
   lines: IncomingSaleLine[];
   /** POS-070: `{ type: "percent" | "amount", value }` on the bill after line discounts. */
   invoiceDiscount?: unknown;
@@ -76,6 +78,11 @@ export type CreateSaleInput = {
    */
   resumedFromId?: string | null;
   idempotencyKey?: string;
+  /**
+   * Who owns the idempotency key when there is no `actor` (server-side callers
+   * such as stock adjustments). Keys are scoped per user + branch.
+   */
+  idempotencyOwner?: string;
   /** BRN-08: stamp from session when present */
   branchId?: string | null;
   branchName?: string | null;
@@ -263,21 +270,21 @@ function resolveSaleType(lines: ValidatedSaleLine[]) {
   return "Retail";
 }
 
-function normalizePayment(value: string): string {
-  const raw = (value || "cash").toLowerCase();
-  if (
-    raw === "cash" ||
-    raw === "card" ||
-    raw === "bank" ||
-    raw === "credit" ||
-    raw === "mixed"
-  ) {
-    return raw;
-  }
-  return "cash";
-}
-
+export const PAYMENT_METHODS = new Set(["cash", "card", "bank", "credit", "mixed"]);
 const SPLIT_METHODS = new Set(["cash", "card", "bank", "credit"]);
+
+/**
+ * A bill with no payment field is cash (existing default). Anything sent must
+ * be one of the known methods — an unknown value is rejected, never recorded
+ * as cash. Case-insensitive; padding/whitespace variants are not accepted.
+ */
+export function normalizePayment(value: unknown): string {
+  if (value === undefined) return "cash";
+  if (typeof value !== "string" || !PAYMENT_METHODS.has(value.toLowerCase())) {
+    throw new SaleError("VALIDATION", "Invalid payment method");
+  }
+  return value.toLowerCase();
+}
 
 /**
  * Validates and normalizes a mixed-payment breakdown against the sale total.
@@ -285,7 +292,7 @@ const SPLIT_METHODS = new Set(["cash", "card", "bank", "credit"]);
  */
 export function normalizePaymentBreakdown(
   payment: string,
-  breakdown: PaymentSplitInput[] | undefined,
+  breakdown: readonly unknown[] | undefined,
   total: number,
   requireBalanced: boolean,
 ): { method: string; amount: number }[] {
@@ -295,12 +302,16 @@ export function normalizePaymentBreakdown(
   }
   const byMethod = new Map<string, number>();
   for (const entry of breakdown) {
-    const method = (entry.method || "").toLowerCase();
-    if (!SPLIT_METHODS.has(method)) {
-      throw new SaleError("VALIDATION", `Invalid payment method in breakdown: ${entry.method}`);
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new SaleError("VALIDATION", "Invalid payment breakdown entry");
     }
-    const amount = Number(entry.amount);
-    if (!Number.isFinite(amount) || amount < 0) {
+    const raw = entry as { method?: unknown; amount?: unknown };
+    const method = typeof raw.method === "string" ? raw.method.toLowerCase() : "";
+    if (!SPLIT_METHODS.has(method)) {
+      throw new SaleError("VALIDATION", "Invalid payment method in breakdown");
+    }
+    const amount = raw.amount;
+    if (typeof amount !== "number" || !Number.isFinite(amount) || amount < 0) {
       throw new SaleError("VALIDATION", `Invalid amount for ${method} in breakdown`);
     }
     if (amount === 0) continue;
@@ -556,6 +567,112 @@ async function holdSale(input: CreateSaleInput) {
 }
 
 /**
+ * POS-146b: a client key is only meaningful for the user + branch that sent
+ * it. Scoping the stored key means another till can never collide with (or
+ * read back) this till's sale through a reused key.
+ */
+export function scopedIdempotencyKey(
+  clientKey: string | undefined,
+  userId: string | undefined,
+  branchId: string | null | undefined,
+): string | undefined {
+  if (!clientKey) return undefined;
+  return `u:${userId || "-"}|b:${branchId || "-"}|k:${clientKey}`;
+}
+
+type FingerprintSource = {
+  customerPhone?: unknown;
+  salesperson?: unknown;
+  payment?: unknown;
+  paymentBreakdown?: Array<{ method?: unknown; amount?: unknown }> | null;
+  lines?: Array<Record<string, unknown>> | null;
+  invoiceDiscountType?: unknown;
+  invoiceDiscountValue?: unknown;
+  resumedFromId?: unknown;
+};
+
+/**
+ * What a checkout charged, from the stored-sale shape (linesForInsert output
+ * or a sale document) — so a retry can be compared with the sale it made.
+ */
+export function checkoutFingerprint(d: FingerprintSource): string {
+  const id = (v: unknown) => (v ? String(v) : "");
+  const lines = (d.lines ?? []).map((l) => ({
+    p: id(l.productId),
+    q: Number(l.qty),
+    t: String(l.lineType ?? ""),
+    u: String(l.unitLabel ?? ""),
+    o: id(l.oilProductId),
+    f: id(l.formulaId),
+    k: (Array.isArray(l.packagingProductIds) ? l.packagingProductIds : []).map(String).sort(),
+    d: l.discountType ? [String(l.discountType), Number(l.discountValue)] : null,
+  }));
+  const split = (d.paymentBreakdown ?? [])
+    .map((e) => `${String(e.method)}:${Number(e.amount)}`)
+    .sort();
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        ph: String(d.customerPhone ?? ""),
+        sp: String(d.salesperson ?? ""),
+        pay: String(d.payment ?? ""),
+        split,
+        lines,
+        inv: d.invoiceDiscountType ? [String(d.invoiceDiscountType), Number(d.invoiceDiscountValue)] : null,
+        r: id(d.resumedFromId),
+      }),
+    )
+    .digest("hex");
+}
+
+/** Sales stored before keys were scoped carry the raw client key. */
+const LEGACY_KEY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A retry that spans the deploy of scoped keys: the earlier attempt was
+ * stored under the raw key, with no owner recorded. It is returned only when
+ * it is recent, from the same branch and the identical bill — anything else is
+ * ignored (never revealed), and this checkout proceeds as a new sale.
+ */
+async function findLegacyRetry(
+  clientKey: string,
+  branchId: string | null | undefined,
+  fingerprint: string,
+) {
+  const legacy = await Sale.findOne({
+    idempotencyKey: clientKey,
+    createdAt: { $gte: new Date(Date.now() - LEGACY_KEY_WINDOW_MS) },
+  }).lean<Record<string, unknown>>();
+  if (!legacy) return null;
+  if (String(legacy.branchId ?? "") !== String(branchId ?? "")) return null;
+  if (checkoutFingerprint(legacy as FingerprintSource) !== fingerprint) return null;
+  return {
+    sale: { ...legacy, id: String(legacy._id) },
+    deduplicated: true as const,
+    timingMs: undefined,
+  };
+}
+
+/**
+ * The key was already used by this user + branch: the same bill gets the
+ * original sale back; a different bill is refused (409) — never a second sale.
+ */
+function replayOrConflict(existing: Record<string, unknown>, fingerprint: string) {
+  if (checkoutFingerprint(existing as FingerprintSource) !== fingerprint) {
+    throw new SaleError(
+      "IDEMPOTENCY_CONFLICT",
+      "This checkout was already completed with different details. The earlier sale stands and this cart was not charged.",
+      { saleId: String(existing._id) },
+    );
+  }
+  return {
+    sale: { ...existing, id: String(existing._id) },
+    deduplicated: true as const,
+    timingMs: undefined,
+  };
+}
+
+/**
  * POS complete — validate, then ONE Mongo transaction for every write:
  * FIFO stock deduction + customer stats + sale insert commit together or not
  * at all. A crash or error mid-way can no longer leave stock deducted with no
@@ -567,6 +684,11 @@ async function holdSale(input: CreateSaleInput) {
 export async function createSale(input: CreateSaleInput) {
   const status = input.status ?? "completed";
   if (status === "held") return holdSale(input);
+  // POS-142b: the only stock-consuming outcome is a completed sale. The insert
+  // below is a native driver call (no schema enum), so guard every caller here.
+  if (status !== "completed") {
+    throw new SaleError("VALIDATION", "Invalid sale status — checkout can only complete or hold a bill");
+  }
 
   const t0 = Date.now();
   await connectDB();
@@ -579,7 +701,13 @@ export async function createSale(input: CreateSaleInput) {
   }
 
   const phone = input.customerPhone.trim();
-  const idempotencyKey = input.idempotencyKey?.trim() || undefined;
+  const actor = input.actor ?? null;
+  const clientKey = input.idempotencyKey?.trim() || undefined;
+  const idempotencyKey = scopedIdempotencyKey(
+    clientKey,
+    actor?.userId ?? input.idempotencyOwner,
+    input.branchId,
+  );
   const givenName = input.customerName?.trim();
   const payment = normalizePayment(input.payment);
   const resumedFromId = input.resumedFromId ? asObjectId(input.resumedFromId) : undefined;
@@ -598,7 +726,32 @@ export async function createSale(input: CreateSaleInput) {
     input.invoiceDiscount,
     validated.subtotal,
   );
-  const actor = input.actor ?? null;
+  // Mixed payment must cover the amount actually charged — after discounts.
+  const paymentBreakdown = normalizePaymentBreakdown(
+    payment,
+    input.paymentBreakdown,
+    breakdown.total,
+    true,
+  );
+  // POS-154: a retry of a key this user + branch already used is answered from
+  // the stored sale before approvals are re-checked (a used approval token must
+  // not turn a lost-response retry into an error).
+  const fingerprint = checkoutFingerprint({
+    customerPhone: phone,
+    salesperson,
+    payment,
+    paymentBreakdown,
+    lines: linesForInsert(validated.lines, breakdown),
+    invoiceDiscountType: breakdown.invoiceDiscount?.type,
+    invoiceDiscountValue: breakdown.invoiceDiscount?.value,
+    resumedFromId,
+  });
+  if (idempotencyKey) {
+    const existing = await Sale.findOne({ idempotencyKey }).lean<Record<string, unknown>>();
+    if (existing) return replayOrConflict(existing, fingerprint);
+    const legacy = await findLegacyRetry(clientKey!, input.branchId, fingerprint);
+    if (legacy) return legacy;
+  }
   // POS-060..067: the final price (server price − every discount) is checked
   // against cost + minimum margin here, never trusting a client flag.
   const floorViolations = await checkPriceFloor(validated, breakdown);
@@ -618,13 +771,6 @@ export async function createSale(input: CreateSaleInput) {
         priceFloor,
       )
     : null;
-  // Mixed payment must cover the amount actually charged — after discounts.
-  const paymentBreakdown = normalizePaymentBreakdown(
-    payment,
-    input.paymentBreakdown,
-    breakdown.total,
-    true,
-  );
   const creditAmount = creditPortion(payment, breakdown.total, paymentBreakdown);
   const tValidate = Date.now();
 
@@ -760,14 +906,8 @@ export async function createSale(input: CreateSaleInput) {
     // Same idempotency key already committed (double-click / retry): the
     // transaction aborted, so nothing was deducted twice — return the original.
     if (idempotencyKey && isDuplicateKey(err)) {
-      const dup = await Sale.findOne({ idempotencyKey }).lean();
-      if (dup) {
-        return {
-          sale: { ...dup, id: String(dup._id) },
-          deduplicated: true as const,
-          timingMs: undefined,
-        };
-      }
+      const dup = await Sale.findOne({ idempotencyKey }).lean<Record<string, unknown>>();
+      if (dup) return replayOrConflict(dup, fingerprint);
     }
     throw err;
   } finally {

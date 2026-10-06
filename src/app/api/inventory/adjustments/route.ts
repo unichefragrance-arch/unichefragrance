@@ -188,6 +188,8 @@ export async function POST(req: Request) {
         idempotencyKey: body.idempotencyKey
           ? String(body.idempotencyKey)
           : undefined,
+        // Keys are scoped per user + branch (no cross-user replay).
+        idempotencyOwner: access?.userId,
         branchId: access?.branchId ?? undefined,
         branchName: access?.branchName ?? undefined,
       });

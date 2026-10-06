@@ -102,9 +102,12 @@ function assertIsOil(product: ProductLean, code: "OIL_NOT_SELECTED" | "INVALID_L
   }
 }
 
-/** Sale quantities are whole units (pieces, or N × an approved oil size) — no fractions. */
-function assertPositiveQty(qty: number, label: string) {
-  if (!Number.isInteger(qty) || qty <= 0) {
+/**
+ * Sale quantities are whole units (pieces, or N × an approved oil size) — no
+ * fractions. Must arrive as a JSON number: "2", true or [2] are not coerced.
+ */
+function assertPositiveQty(qty: unknown, label: string): asserts qty is number {
+  if (typeof qty !== "number" || !Number.isSafeInteger(qty) || qty <= 0) {
     throw new SaleError(
       "INVALID_LINE",
       `Invalid quantity for ${label} — must be a whole number of at least 1`,
@@ -154,6 +157,8 @@ async function validateCustomerBlendSale(
     lineIndex: number;
     productsById: Map<string, ProductLean>;
     packagingFallback?: FormulaDoc | null;
+    /** Oil the cashier selected, if any — must be one this formula consumes. */
+    selectedOilId?: string;
   },
 ): Promise<{
   oilMl: number;
@@ -162,6 +167,7 @@ async function validateCustomerBlendSale(
   componentDeductions: DeductionNeed[];
 }> {
   const { lineQty, lineIndex, productsById } = options;
+  const blendOilIds = new Set<string>();
   const foundRoles = new Map<RemixRole, FormulaDoc["components"][number]>();
   const componentDeductions: DeductionNeed[] = [];
   let oilMl = 0;
@@ -194,6 +200,7 @@ async function validateCustomerBlendSale(
       foundRoles.set(role, comp);
     } else if (!role && product.unit === "ml") {
       oilMl += comp.qty;
+      blendOilIds.add(String(comp.productId));
       if (!primaryOil) {
         primaryOil = {
           productId: comp.productId,
@@ -216,6 +223,14 @@ async function validateCustomerBlendSale(
     throw new SaleError(
       "FORMULA_INCOMPLETE",
       "Formula incomplete: customer blend has no oil components",
+    );
+  }
+  // A saved blend consumes its own oils. If the cashier picked an oil that the
+  // blend does not use, refuse — never silently consume a different oil.
+  if (options.selectedOilId && !blendOilIds.has(String(options.selectedOilId))) {
+    throw new SaleError(
+      "OIL_NOT_SELECTED",
+      "The selected oil is not part of this saved formula — remove the oil selection or pick a formula that uses it",
     );
   }
 
@@ -329,6 +344,7 @@ export async function validateRemixSale(
       lineIndex: options.lineIndex,
       productsById,
       packagingFallback: options.packagingFallback,
+      selectedOilId: options.oilProductId,
     });
   }
 
@@ -447,15 +463,21 @@ async function loadDefaultRemixFormula(): Promise<FormulaDoc | null> {
   const cached = peekDefaultRemixFormula();
   if (cached !== undefined) return cached;
 
-  const docs = await Formula.find({ type: "remix", status: "approved" })
+  // BLD-02/03: a plain remix consumes 20 ml of the oil the cashier selects, so
+  // the default BOM must carry the oil-base placeholder. A customer's formula
+  // or a fixed-oil blend is never the default — those are sold by formulaId.
+  // Among eligible formulas the most recently updated wins (existing rule).
+  const doc = await Formula.findOne({
+    type: "remix",
+    status: "approved",
+    customerId: null,
+    "components.productId": OIL_BASE_PRODUCT_ID,
+  })
     .select("name type status customerId yieldMl components")
     .sort({ updatedAt: -1 })
-    .limit(30)
-    .lean<FormulaDoc[]>();
-  const doc =
-    docs.find((f) => f.customerId == null) || docs[0] || null;
-  defaultRemixCache = { at: Date.now(), doc };
-  return doc;
+    .lean<FormulaDoc>();
+  defaultRemixCache = { at: Date.now(), doc: doc ?? null };
+  return doc ?? null;
 }
 
 /** Call on POS boot so the first remix checkout skips a formula round-trip. */
@@ -490,6 +512,9 @@ export async function validateSaleLines(
 ): Promise<SaleValidationResult> {
   if (!Array.isArray(rawLines) || rawLines.length === 0) {
     throw new SaleError("VALIDATION", "At least one line item is required");
+  }
+  if (rawLines.some((l) => typeof l !== "object" || l === null || Array.isArray(l))) {
+    throw new SaleError("INVALID_LINE", "Each line item must be an object");
   }
 
   const needsRemix = rawLines.some((l) => l.lineType === "remix");
@@ -571,7 +596,7 @@ export async function validateSaleLines(
 
   for (let i = 0; i < rawLines.length; i++) {
     const raw = rawLines[i];
-    const qty = Number(raw.qty);
+    const qty: unknown = raw.qty;
     assertPositiveQty(qty, `line ${i + 1}`);
 
     const lineType = raw.lineType as ValidatedSaleLine["lineType"];
@@ -758,6 +783,16 @@ export async function validateSaleLines(
         }
       }
 
+      if (
+        !raw.formulaId &&
+        formulaForLine &&
+        !formulaForLine.components.some((c) => c.productId === OIL_BASE_PRODUCT_ID)
+      ) {
+        throw new SaleError(
+          "FORMULA_INCOMPLETE",
+          "Default remix formula must use the selected oil (oil-base) — BLD-02/03",
+        );
+      }
       const remix = await validateRemixSale(formulaForLine, {
         oilProductId: raw.oilProductId,
         lineQty: qty,

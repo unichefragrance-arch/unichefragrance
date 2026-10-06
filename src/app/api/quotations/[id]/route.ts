@@ -242,7 +242,7 @@ export async function POST(req: Request, ctx: Ctx) {
     if (!mongoose.isValidObjectId(id)) {
       return NextResponse.json({ error: "Invalid quotation id" }, { status: 400 });
     }
-    const body = await req.json().catch(() => ({}));
+    const body = (await req.json().catch(() => null)) ?? {};
     const action = body.action || "convert";
     const quotation = await Quotation.findById(id);
     if (!quotation) {

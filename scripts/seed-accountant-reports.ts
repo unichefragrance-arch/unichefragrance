@@ -20,6 +20,7 @@ import {
   Sale,
   Supplier,
 } from "../src/lib/models";
+import { assertLocalOnlyTarget } from "./lib/dbSafety";
 
 /**
  * Additive seed for the Accountant's Report Center (sales, purchase, profit,
@@ -43,6 +44,8 @@ function daysAgo(n: number, hour = 12, minute = 0) {
 }
 
 async function main() {
+  // Destructive: local databases only — refuses Atlas/remote/unset targets, no override.
+  assertLocalOnlyTarget("seed-accountant-reports");
   console.log("Connecting to MongoDB...");
   await connectDB();
 

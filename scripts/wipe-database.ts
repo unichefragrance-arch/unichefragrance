@@ -11,8 +11,11 @@ import fs from "node:fs";
 import path from "node:path";
 import mongoose from "mongoose";
 import { connectDB } from "../src/lib/db";
+import { assertLocalOnlyTarget } from "./lib/dbSafety";
 
 async function main() {
+  // Destructive: local databases only — refuses Atlas/remote/unset targets, no override.
+  assertLocalOnlyTarget("wipe-database");
   if (!process.argv.includes("--yes")) {
     console.error("Refusing to wipe without --yes. Usage: npm run db:wipe -- --yes");
     process.exit(1);

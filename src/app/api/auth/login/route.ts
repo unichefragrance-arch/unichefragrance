@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { issueSession } from "@/lib/auth/sessionStore";
 import { safeErrorMessage } from "@/lib/auth/apiGuard";
 import {
   ensureAuthBootstrap,
@@ -12,7 +13,6 @@ import { permissionsForRole, ROLE_LABELS } from "@/lib/auth/roles";
 import { recordAudit } from "@/lib/audit/log";
 import {
   applySessionCookie,
-  createSessionToken,
 } from "@/lib/auth/session";
 import { AUTH_TIMEOUT_MS, withAuthTimeout } from "@/lib/auth/timeout";
 import { connectDB } from "@/lib/db";
@@ -32,7 +32,7 @@ function rateLimitHeaders(remaining: number, resetAt: Date, retryAfterSec?: numb
 
 async function loginHandler(req: Request) {
   // Parse body first — no DB needed.
-  const body = (await req.json().catch(() => ({}))) as {
+  const body = ((await req.json().catch(() => null)) ?? {}) as {
     email?: string;
     password?: string;
   };
@@ -117,7 +117,9 @@ async function loginHandler(req: Request) {
     id: String(user._id),
   })!;
 
-  const token = createSessionToken({
+  // Server-side session record so this login can be revoked (logout,
+  // deactivation, role/branch change) before the cookie expires.
+  const { token } = await issueSession({
     userId: mapped.id,
     name: mapped.name,
     email: mapped.email,

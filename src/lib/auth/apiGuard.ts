@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import {
   isAuthResponse,
@@ -23,21 +24,83 @@ const DB_CONNECTION_ERROR_NAMES = new Set([
   "MongoServerSelectionError",
   "MongooseServerSelectionError",
   "MongoTimeoutError",
+  "MongoNotConnectedError",
+  "MongoTopologyClosedError",
+  "MongoPoolClearedError",
 ]);
 
+/** The database is unreachable (not a bad request) — callers answer 503. */
+export function isDbUnavailable(error: unknown): boolean {
+  return error instanceof Error && DB_CONNECTION_ERROR_NAMES.has(error.name);
+}
+
 /**
- * Never leak raw Mongo/driver error text (can include internal file paths,
- * connection strings) to API clients. Everything else still surfaces its
- * own message so callers get actionable validation/business errors.
+ * Errors whose text describes our code or database, not the request:
+ * runtime faults (TypeError…) and driver/ODM errors (index names, key
+ * values, model paths). Business errors (SaleError, plain `Error` thrown
+ * with a user-facing message) keep their message.
+ */
+const INTERNAL_ERROR_NAMES = new Set([
+  "TypeError",
+  "ReferenceError",
+  "RangeError",
+  "EvalError",
+  "URIError",
+  "CastError",
+  "MongoError",
+  "MongoServerError",
+  "MongoBulkWriteError",
+  "MongooseError",
+  "StrictModeError",
+  "VersionError",
+  "ParallelSaveError",
+  "MissingSchemaError",
+  "DocumentNotFoundError",
+]);
+
+/** Strip things that must never reach a log: connection strings, key values. */
+function redactForLog(text: string): string {
+  return text
+    .replace(/mongodb(\+srv)?:\/\/[^\s"'`]+/g, "mongodb://<redacted>")
+    .replace(/dup key: \{[^}]*\}/g, "dup key: {<redacted>}")
+    .replace(/for value "[^"]*"/g, 'for value "<redacted>"');
+}
+
+/** Server-side record of an unexpected error; the client only gets the ref. */
+export function logServerError(ref: string, error: unknown): void {
+  const e = error instanceof Error ? error : new Error(String(error));
+  const code = (e as { code?: unknown }).code;
+  const stack = (e.stack ?? "").split("\n").slice(1).join("\n");
+  console.error(
+    `[api-error ref=${ref}] ${e.name}${code !== undefined ? ` (code ${String(code)})` : ""}: ${redactForLog(e.message)}\n${redactForLog(stack)}`,
+  );
+}
+
+/**
+ * Message for an API error response. Never returns implementation details
+ * (stack traces, runtime/driver messages, connection strings): those get a
+ * generic message with a reference id, and the details go to the server log
+ * under the same id. Business/validation errors keep their own message.
  */
 export function safeErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && DB_CONNECTION_ERROR_NAMES.has(error.name)) {
-    if (process.env.NODE_ENV !== "production") {
-      return `${fallback} — DB connection error (dev only): ${error.name}: ${error.message}`;
-    }
-    return "Something went wrong. Please try again later.";
+  if (error instanceof SyntaxError) {
+    return "Request body must be valid JSON";
   }
-  return error instanceof Error ? error.message : fallback;
+  if (error instanceof Error && error.name === "ValidationError") {
+    const paths = Object.keys((error as { errors?: Record<string, unknown> }).errors ?? {});
+    return paths.length > 0 ? `Invalid data: ${paths.join(", ")}` : "Invalid data";
+  }
+  const internal =
+    !(error instanceof Error) ||
+    DB_CONNECTION_ERROR_NAMES.has(error.name) ||
+    INTERNAL_ERROR_NAMES.has(error.name) ||
+    error.name.startsWith("Mongo");
+  if (internal) {
+    const ref = randomBytes(4).toString("hex");
+    logServerError(ref, error);
+    return `${fallback}. Something went wrong — please try again (ref ${ref}).`;
+  }
+  return error.message || fallback;
 }
 
 /**

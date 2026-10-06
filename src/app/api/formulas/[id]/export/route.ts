@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { NextResponse } from "next/server";
 import {
   isFormulaAdminResponse,
@@ -28,6 +29,9 @@ export async function GET(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid formula id" }, { status: 400 });
+    }
     const doc = await Formula.findById(id).lean();
     if (!doc) {
       return NextResponse.json({ error: "Formula not found" }, { status: 404 });

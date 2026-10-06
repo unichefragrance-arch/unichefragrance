@@ -4,7 +4,7 @@ import { assertLocalDb } from "../../src/lib/e2eGuard";
 import { spawn } from "node:child_process";
 import { connectDB } from "../../src/lib/db";
 import { Branch, Customer, User } from "../../src/lib/models";
-import { createSessionToken } from "../../src/lib/auth/session";
+import { testSessionCookie } from "../../src/lib/auth/testSession";
 assertLocalDb();
 const BASE = "http://localhost:3957";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -14,7 +14,7 @@ const req = async (m: string, p: string, c?: string, b?: unknown) => { const r =
 (async () => {
   await connectDB();
   const br = (await Branch.findOne().lean<any>())!; const u = (await User.findOne({ role: "cashier" }).lean<any>())!;
-  const ck = `unich_session=${createSessionToken({ userId: String(u._id), name: u.name, email: u.email, role: "cashier", roleLabel: "c", branchId: String(br._id), branchName: br.name })}`;
+  const ck = (await testSessionCookie({ userId: String(u._id), name: u.name, email: u.email, role: "cashier", roleLabel: "c", branchId: String(br._id), branchName: br.name }));
   const srv = spawn("npx", ["next", "start", "-p", "3957"], { cwd: process.cwd(), env: process.env, stdio: "ignore", detached: true });
   try {
     for (let i = 0; i < 240; i++) { try { if ((await fetch(BASE + "/api/health")).ok) break; } catch { /* */ } await sleep(500); }

@@ -55,8 +55,9 @@ export async function POST(req: Request) {
     if (access !== null && isAuthResponse(access)) return access;
 
     await connectDB();
-    const form = await req.formData();
-    const file = form.get("file");
+    // Not multipart (e.g. a JSON body) → formData() throws; that's a bad request.
+    const form = await req.formData().catch(() => null);
+    const file = form?.get("file");
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "file is required" }, { status: 400 });
     }

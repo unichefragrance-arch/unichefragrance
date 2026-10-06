@@ -89,7 +89,7 @@ export async function POST(req: Request, ctx: Ctx) {
   try {
     await connectDB();
     const { token } = await ctx.params;
-    const body = await req.json().catch(() => ({}));
+    const body = (await req.json().catch(() => null)) ?? {};
     const decision = body.decision === "rejected" ? "rejected" : body.decision === "approved" ? "approved" : null;
     if (!decision) {
       return NextResponse.json({ error: "decision must be 'approved' or 'rejected'" }, { status: 400 });

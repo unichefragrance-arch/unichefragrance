@@ -8,7 +8,7 @@ import { completeProductionOrder } from "@/lib/production/completeProduction";
 import { mapProductionOrder } from "@/lib/production/mapProduction";
 import { SaleError } from "@/lib/sales/errors";
 import { toJSON } from "@/lib/serialize";
-import { isAuthResponse, requireApiAccess } from "@/lib/auth/apiGuard";
+import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -22,7 +22,7 @@ export async function POST(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
-    const body = (await req.json().catch(() => ({}))) as {
+    const body = ((await req.json().catch(() => null)) ?? {}) as {
       actualYieldMl?: number | string;
     };
 
@@ -49,9 +49,7 @@ export async function POST(req: Request, ctx: Ctx) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to complete production order",
+          safeErrorMessage(error, "Failed to complete production order"),
       },
       { status: 400 },
     );

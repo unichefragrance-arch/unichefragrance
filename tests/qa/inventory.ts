@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
 import { connectDB } from "../../src/lib/db";
 import { AppSettings, Branch, FifoLayer, Formula, Product, Sale, User } from "../../src/lib/models";
-import { createSessionToken } from "../../src/lib/auth/session";
+import { testSessionCookie } from "../../src/lib/auth/testSession";
 
 assertLocalDb();
 const BASE = "http://localhost:3960";
@@ -36,7 +36,7 @@ async function main() {
   const ck: Record<string, string> = {};
   for (const role of roles) {
     const u = (await User.findOne({ role }).lean<any>())!;
-    ck[role] = `unich_session=${createSessionToken({ userId: String(u._id), name: u.name, email: u.email, role, roleLabel: role, branchId: String(branch._id), branchName: branch.name })}`;
+    ck[role] = (await testSessionCookie({ userId: String(u._id), name: u.name, email: u.email, role, roleLabel: role, branchId: String(branch._id), branchName: branch.name }));
   }
   await AppSettings.updateOne({ key: "default" }, { $addToSet: { salespeople: "QA Inventory" } });
   const tag = Date.now();
@@ -130,7 +130,17 @@ async function main() {
     const b3 = await bomSnap();
     rec("POS-134", "3 remixes: every component × 3", rm3.status === 201 && b1.every((v, i) => r3(v - b3[i]) === per[i] * 3), `Δ ${b1.map((v, i) => r3(v - b3[i])).join(",")}`);
     const rd = (await Sale.findById(rm1.body.id).lean<any>()).inventoryDeductions;
-    rec("POS-134", "sale records one deduction per component with FIFO cost", rd.length === 7 && rd.every((d: any) => d.costTotal > 0), `${rd.length} deductions, cost ${r3(rd.reduce((a: number, d: any) => a + d.costTotal, 0))}`);
+    // This fixed-oil formula is sold by formulaId (saved-blend path), which fills
+    // roles the blend lacks from the DEFAULT remix BOM (validateCustomerBlendSale).
+    // It used to be the default itself only because the newest approved formula
+    // won regardless of the oil-base placeholder (BLD-02/03 bug) — now the real
+    // default fills fixative / label / box. Each formula component: exactly one
+    // deduction with FIFO cost; extras: only those fallback roles.
+    const own = new Set(bom.map(([p]) => String(p._id)));
+    const mine = rd.filter((d: any) => own.has(String(d.productId)));
+    const filled = rd.filter((d: any) => !own.has(String(d.productId)));
+    const oneEach = new Set(rd.map((d: any) => String(d.productId))).size === rd.length;
+    rec("POS-134", "sale records one deduction per component with FIFO cost", mine.length === 7 && oneEach && rd.every((d: any) => d.costTotal > 0) && filled.every((d: any) => /^remix:(fixative|label|box)$/.test(d.reason)), `${mine.length} formula + ${filled.length} default-BOM roles (${filled.map((d: any) => d.reason).join(", ")}), cost ${r3(rd.reduce((a: number, d: any) => a + d.costTotal, 0))}`);
     // insufficient component: leave only 1 pouch
     const pouchNow = await stock(PCH);
     await Product.updateOne({ _id: PCH._id }, { $set: { stockSellable: 1 } });

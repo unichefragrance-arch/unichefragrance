@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import mongoose from "mongoose";
 import { connectDB } from "../../src/lib/db";
 import { AppSettings, Product, Quotation, Sale, User } from "../../src/lib/models";
-import { createSessionToken } from "../../src/lib/auth/session";
+import { testSessionCookie } from "../../src/lib/auth/testSession";
 assertLocalDb();
 const BASE = "http://localhost:3950"; const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const req = async (m: string, p: string, c?: string, b?: unknown) => { const r = await fetch(BASE + p, { method: m, headers: { "Content-Type": "application/json", ...(c ? { Cookie: c } : {}) }, body: b === undefined ? undefined : JSON.stringify(b) }); return { status: r.status, body: (await r.json().catch(() => ({}))) as any }; };
@@ -13,7 +13,7 @@ let pass = 0, fail = 0; const rec = (n: string, ok: boolean, d: string) => { ok 
 (async () => {
   await connectDB();
   const u = (await User.findOne({ role: "cashier" }).lean<any>())!;
-  const ck = `unich_session=${createSessionToken({ userId: String(u._id), name: u.name, email: u.email, role: "cashier", roleLabel: "Cashier", branchId: String(u.branchId), branchName: u.branchName })}`;
+  const ck = (await testSessionCookie({ userId: String(u._id), name: u.name, email: u.email, role: "cashier", roleLabel: "Cashier", branchId: String(u.branchId), branchName: u.branchName }));
   const srv = spawn("npx", ["next", "start", "-p", "3950"], { cwd: process.cwd(), env: process.env, stdio: "ignore", detached: true });
   try {
     for (let i = 0; i < 240; i++) { try { if ((await fetch(BASE + "/api/health")).ok) break; } catch { /* */ } await sleep(500); }

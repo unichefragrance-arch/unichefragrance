@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import { Supplier } from "@/lib/models";
@@ -13,6 +14,9 @@ export async function PUT(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid supplier id" }, { status: 400 });
+    }
     const body = await req.json();
     if (body.lastPurchase) body.lastPurchase = new Date(body.lastPurchase);
     const supplier = await Supplier.findByIdAndUpdate(id, body, {
@@ -38,6 +42,9 @@ export async function DELETE(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid supplier id" }, { status: 400 });
+    }
     const supplier = await Supplier.findByIdAndDelete(id);
     if (!supplier) {
       return NextResponse.json({ error: "Supplier not found" }, { status: 404 });

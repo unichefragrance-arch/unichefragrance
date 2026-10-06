@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { NextResponse } from "next/server";
 import { safeErrorMessage } from "@/lib/auth/apiGuard";
 import {
@@ -11,7 +12,7 @@ import {
   ROLE_LABELS,
 } from "@/lib/auth/roles";
 import { connectDB } from "@/lib/db";
-import { Branch, User } from "@/lib/models";
+import { AuthSession, Branch, User } from "@/lib/models";
 import { recordAudit } from "@/lib/audit/log";
 import type { UserRole } from "@/lib/types";
 
@@ -24,6 +25,9 @@ export async function GET(req: Request, ctx: Ctx) {
     if (isAuthResponse(auth)) return auth;
 
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid user id" }, { status: 400 });
+    }
     await connectDB();
     const user = await User.findById(id);
     if (!user) {
@@ -47,10 +51,32 @@ export async function PUT(req: Request, ctx: Ctx) {
     if (isAuthResponse(auth)) return auth;
 
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid user id" }, { status: 400 });
+    }
     await connectDB();
     const user = await User.findById(id);
     if (!user) {
       return NextResponse.json({ error: "User not found." }, { status: 404 });
+    }
+    // Any change to an Owner (password, email, active…) — not just role —
+    // would let a non-Owner take the account over.
+    if (user.role === "owner" && auth.role !== "owner") {
+      return NextResponse.json(
+        { error: "Only Owner can modify Owner users." },
+        { status: 403 },
+      );
+    }
+    // Same scope as POST: non-Owner managers only manage their own branch.
+    if (
+      auth.role !== "owner" &&
+      auth.branchId &&
+      String(user.branchId ?? "") !== auth.branchId
+    ) {
+      return NextResponse.json(
+        { error: "You can only manage users in your own branch." },
+        { status: 403 },
+      );
     }
 
     const body = (await req.json()) as {
@@ -80,6 +106,7 @@ export async function PUT(req: Request, ctx: Ctx) {
       }
     }
 
+    let passwordChanged = false;
     if (typeof body.password === "string" && body.password.length > 0) {
       if (body.password.length < 6) {
         return NextResponse.json(
@@ -88,6 +115,7 @@ export async function PUT(req: Request, ctx: Ctx) {
         );
       }
       user.passwordHash = hashPassword(body.password);
+      passwordChanged = true;
     }
 
     if (body.role !== undefined) {
@@ -154,6 +182,13 @@ export async function PUT(req: Request, ctx: Ctx) {
     }
 
     await user.save();
+    // A reset password must also end logins made with the old one.
+    if (passwordChanged) {
+      await AuthSession.updateMany(
+        { userId: String(user._id), revokedAt: null },
+        { $set: { revokedAt: new Date() } },
+      );
+    }
     recordAudit({
       session: auth,
       action: "user_updated",
@@ -180,6 +215,9 @@ export async function DELETE(req: Request, ctx: Ctx) {
     if (isAuthResponse(auth)) return auth;
 
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid user id" }, { status: 400 });
+    }
     if (id === auth.userId) {
       return NextResponse.json(
         { error: "You cannot delete your own account." },
@@ -195,6 +233,16 @@ export async function DELETE(req: Request, ctx: Ctx) {
     if (user.role === "owner" && auth.role !== "owner") {
       return NextResponse.json(
         { error: "Only Owner can remove Owner users." },
+        { status: 403 },
+      );
+    }
+    if (
+      auth.role !== "owner" &&
+      auth.branchId &&
+      String(user.branchId ?? "") !== auth.branchId
+    ) {
+      return NextResponse.json(
+        { error: "You can only manage users in your own branch." },
         { status: 403 },
       );
     }

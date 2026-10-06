@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { usePathname } from "next/navigation";
 import { Moon, Sun, Wifi } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
@@ -33,6 +33,8 @@ function resolvePageTitle(pathname: string, fallback?: string) {
   return match?.label;
 }
 
+const noopSubscribe = () => () => {};
+
 export function TopBar({ title }: { title?: string }) {
   const pathname = usePathname();
   const pageTitle = resolvePageTitle(pathname, title);
@@ -43,8 +45,11 @@ export function TopBar({ title }: { title?: string }) {
   // client-side — but SSR always assumes "dark" (no `document`). Render the
   // SSR-safe "dark" version until after mount so hydration always matches;
   // the real theme (if different) appears a frame later.
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const mounted = useSyncExternalStore(
+    noopSubscribe,
+    () => true,
+    () => false,
+  );
   const resolvedTheme = mounted ? theme : "dark";
 
   return (

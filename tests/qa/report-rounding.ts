@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
 import { connectDB } from "../../src/lib/db";
 import { AppSettings, Branch, FifoLayer, Product, User } from "../../src/lib/models";
-import { createSessionToken } from "../../src/lib/auth/session";
+import { testSessionCookie } from "../../src/lib/auth/testSession";
 assertLocalDb();
 const BASE = "http://localhost:3958"; const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const req = async (m: string, p: string, c?: string, b?: unknown) => { const r = await fetch(BASE + p, { method: m, headers: { "Content-Type": "application/json", ...(c ? { Cookie: c } : {}) }, body: b === undefined ? undefined : JSON.stringify(b) }); return { status: r.status, body: (await r.json().catch(() => ({}))) as any }; };
@@ -14,7 +14,7 @@ let pass = 0, fail = 0; const rec = (n: string, ok: boolean, d: string) => { ok 
 (async () => {
   await connectDB();
   const br = (await Branch.findOne().lean<any>())!;
-  const mk = async (role: string) => { const u = (await User.findOne({ role }).lean<any>())!; return `unich_session=${createSessionToken({ userId: String(u._id), name: u.name, email: u.email, role: role as any, roleLabel: role, branchId: String(br._id), branchName: br.name })}`; };
+  const mk = async (role: string) => { const u = (await User.findOne({ role }).lean<any>())!; return (await testSessionCookie({ userId: String(u._id), name: u.name, email: u.email, role: role as any, roleLabel: role, branchId: String(br._id), branchName: br.name })); };
   const cashier = await mk("cashier"), owner = await mk("owner");
   const sp = `QA Baisa ${Date.now()}`;
   await AppSettings.updateOne({ key: "default" }, { $addToSet: { salespeople: sp } });

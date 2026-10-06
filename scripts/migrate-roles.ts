@@ -9,6 +9,7 @@ try {
 }
 
 import mongoose from "mongoose";
+import { migrationMode } from "./lib/dbSafety";
 import { connectDB } from "../src/lib/db";
 import { Branch, User } from "../src/lib/models";
 import { hashPassword } from "../src/lib/auth/password";
@@ -27,11 +28,23 @@ const ROLE_RENAMES: Record<string, "owner" | "manager" | "cashier"> = {
 };
 
 async function main() {
+  // Dry run unless --apply --confirm-db=<name>.
+  const { apply } = migrationMode("migrate-roles");
   await connectDB();
 
   console.log("Before:");
   for (const role of await User.distinct("role")) {
     console.log(`  ${role}: ${await User.countDocuments({ role })}`);
+  }
+
+  if (!apply) {
+    for (const [oldRole, newRole] of Object.entries(ROLE_RENAMES)) {
+      console.log(`[dry run] ${oldRole} -> ${newRole}: ${await User.countDocuments({ role: oldRole })} would be updated`);
+    }
+    const hasBm = await User.exists({ role: "branch_manager" });
+    console.log(`[dry run] branch_manager account: ${hasBm ? "exists — nothing to create" : "would be created"}`);
+    await mongoose.disconnect();
+    return;
   }
 
   for (const [oldRole, newRole] of Object.entries(ROLE_RENAMES)) {

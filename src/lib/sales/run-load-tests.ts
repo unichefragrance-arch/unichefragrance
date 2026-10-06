@@ -30,7 +30,7 @@
  *                only; no browser CPU / memory / JS errors).
  *
  * Same safety guard as the E2E suites: refuses unless DATABASE_URL is local
- * (E2E_ALLOW_REMOTE_DB=1 to override for a dedicated staging DB).
+ * (no override for remote databases).
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -47,7 +47,7 @@ import {
   Sale,
   User,
 } from "../models";
-import { createSessionToken } from "../auth/session";
+import { testSessionCookie } from "../auth/testSession";
 import { hashPassword } from "../auth/password";
 import { RATE_LIMIT } from "../auth/rateLimitConfig";
 import { assertLocalDb } from "../e2eGuard";
@@ -269,8 +269,8 @@ async function main() {
     { name: "Login User", email: loginUserEmail, passwordHash: hashPassword(password), role: "cashier", roleLabel: "Cashier" },
   ]);
 
-  const sessionCookie = (userId: string, name: string, role: "cashier" | "owner") =>
-    `unich_session=${createSessionToken({
+  const sessionCookie = async (userId: string, name: string, role: "cashier" | "owner") =>
+    (await testSessionCookie({
       userId,
       name,
       email: `${name.toLowerCase().replace(/\s+/g, "-")}@test.local`,
@@ -278,10 +278,10 @@ async function main() {
       roleLabel: role === "owner" ? "Owner" : "Cashier",
       branchId: null,
       branchName: null,
-    })}`;
-  const cookie = sessionCookie("000000000000000000000099", "Load Cashier", "cashier");
-  const cookieB = sessionCookie("000000000000000000000098", "Load Cashier B", "cashier");
-  const ownerCookie = sessionCookie("000000000000000000000097", "Load Admin", "owner");
+    }));
+  const cookie = await sessionCookie("000000000000000000000099", "Load Cashier", "cashier");
+  const cookieB = await sessionCookie("000000000000000000000098", "Load Cashier B", "cashier");
+  const ownerCookie = await sessionCookie("000000000000000000000097", "Load Admin", "owner");
 
   async function post(
     body: Record<string, unknown>,
@@ -483,7 +483,8 @@ async function main() {
     );
     summarize("duplicate key", dup, Math.max(...dup.map((r) => r.ms)));
     await check("idempotency: one sale, stock deducted once, all callers get it", async () => {
-      assert.equal(await Sale.countDocuments({ idempotencyKey: key }), 1);
+      // Stored keys are scoped per user + branch (POS-146b): match on the client key part.
+      assert.equal(await Sale.countDocuments({ idempotencyKey: { $regex: `\\|k:${key}$` } }), 1);
       const after = (await Product.findById(hot[0]._id).lean<{ stockSellable: number }>())!.stockSellable;
       assert.equal(before4 - after, 2);
       const ids = new Set(dup.filter((r) => r.status < 300).map((r) => String(r.body.id)));

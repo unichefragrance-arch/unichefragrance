@@ -32,7 +32,7 @@ export async function GET(req: Request) {
 /** POST — unlock with admin email + password; sets httpOnly cookie. */
 export async function POST(req: Request) {
   try {
-    const body = (await req.json().catch(() => ({}))) as {
+    const body = ((await req.json().catch(() => null)) ?? {}) as {
       email?: string;
       password?: string;
       name?: string;

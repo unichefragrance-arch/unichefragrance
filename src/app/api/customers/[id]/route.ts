@@ -16,6 +16,9 @@ export async function GET(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid customer id" }, { status: 400 });
+    }
     const customer = await Customer.findById(id);
     if (!customer) {
       return NextResponse.json({ error: "Customer not found" }, { status: 404 });
@@ -72,6 +75,9 @@ export async function DELETE(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid customer id" }, { status: 400 });
+    }
     const customer = await Customer.findByIdAndDelete(id);
     if (!customer) {
       return NextResponse.json({ error: "Customer not found" }, { status: 404 });

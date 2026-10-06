@@ -13,8 +13,8 @@
  *
  * Safety: refuses to run unless DATABASE_URL points at localhost (e.g. a
  * throwaway `mongod --replSet` / mongodb-memory-server). Checkout uses a
- * Mongo transaction, so the DB must be a replica set. Override the guard
- * only for a dedicated dev/staging DB: E2E_ALLOW_REMOTE_DB=1.
+ * Mongo transaction, so the DB must be a replica set. There is no override
+ * for remote databases.
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -31,7 +31,7 @@ import {
   Sale,
   User,
 } from "../models";
-import { createSessionToken } from "../auth/session";
+import { testSessionCookie } from "../auth/testSession";
 import { hashPassword } from "../auth/password";
 import { DISCOUNT_LIMIT_PCT } from "./discount";
 import { assertLocalDb } from "../e2eGuard";
@@ -177,7 +177,7 @@ async function main() {
     });
   }
 
-  const cookie = `unich_session=${createSessionToken({
+  const cookie = (await testSessionCookie({
     userId: "000000000000000000000021",
     name: "E2E Cashier",
     email: "e2e-cashier@test.local",
@@ -185,7 +185,7 @@ async function main() {
     roleLabel: "Cashier",
     branchId: null,
     branchName: null,
-  })}`;
+  }));
 
   const stockOf = async () => {
     const [a, b, la, lb] = await Promise.all([
@@ -542,7 +542,7 @@ async function main() {
       const qty = await sell([{ ...overLine[0], qty: 2 }], { discountApprovalToken: token });
       assert.equal(qty.status, 403, JSON.stringify(qty.body));
       // Another cashier presenting the token
-      const otherCookie = `unich_session=${createSessionToken({
+      const otherCookie = (await testSessionCookie({
         userId: "000000000000000000000022",
         name: "E2E Cashier 2",
         email: "e2e-cashier2@test.local",
@@ -550,7 +550,7 @@ async function main() {
         roleLabel: "Cashier",
         branchId: null,
         branchName: null,
-      })}`;
+      }));
       const other = await fetch(`${BASE}/api/sales`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: otherCookie },
@@ -566,7 +566,7 @@ async function main() {
 
     await test("RPT: branch sale stores ObjectId branchId; branch-scoped + by-product reports are net of discount", async () => {
       const branchId = String(new mongoose.Types.ObjectId());
-      const branchCookie = `unich_session=${createSessionToken({
+      const branchCookie = (await testSessionCookie({
         userId: "000000000000000000000023",
         name: "E2E Branch Cashier",
         email: "e2e-branch@test.local",
@@ -574,7 +574,7 @@ async function main() {
         roleLabel: "Cashier",
         branchId,
         branchName: "E2E Branch",
-      })}`;
+      }));
       const res = await fetch(`${BASE}/api/sales`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Cookie: branchCookie },
@@ -594,7 +594,7 @@ async function main() {
       assert.equal(body.total, 10400);
       const raw = await Sale.collection.findOne({ _id: new mongoose.Types.ObjectId(body.id) });
       assert.ok(raw!.branchId instanceof mongoose.Types.ObjectId, `branchId type ${typeof raw!.branchId}`);
-      const ownerCookie = `unich_session=${createSessionToken({
+      const ownerCookie = (await testSessionCookie({
         userId: String(approvers[0]._id),
         name: "E2E Owner",
         email: ownerEmail,
@@ -602,7 +602,7 @@ async function main() {
         roleLabel: "Owner",
         branchId: null,
         branchName: null,
-      })}`;
+      }));
       const d = new Date();
       const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const report = async (id: string) =>
@@ -712,8 +712,8 @@ async function main() {
     const idH = String(holdProduct._id);
     const holdStock = async () =>
       (await Product.findById(idH).lean<{ stockSellable: number }>())!.stockSellable;
-    const sessionFor = (userId: string, branchId: string | null) =>
-      `unich_session=${createSessionToken({
+    const sessionFor = async (userId: string, branchId: string | null) =>
+      (await testSessionCookie({
         userId,
         name: "E2E Till",
         email: `e2e-till-${userId}@test.local`,
@@ -721,7 +721,7 @@ async function main() {
         roleLabel: "Cashier",
         branchId,
         branchName: branchId ? "E2E Branch" : null,
-      })}`;
+      }));
     const call = async (method: string, path: string, body?: unknown, asCookie = cookie) => {
       const res = await fetch(`${BASE}${path}`, {
         method,
@@ -750,7 +750,7 @@ async function main() {
         const held = await holdBill([{ productId: idH, qty: 1, lineType: "ready" }]);
         const before = await holdStock();
         const [a, b] = await Promise.all(
-          [cookie, sessionFor("000000000000000000000022", null)].map((c) =>
+          [cookie, await sessionFor("000000000000000000000022", null)].map((c) =>
             call(
               "POST",
               "/api/sales",
@@ -803,8 +803,8 @@ async function main() {
       });
 
       await test("§14: another branch can't read, discard or complete a held bill", async () => {
-        const branch1 = sessionFor("000000000000000000000023", String(new mongoose.Types.ObjectId()));
-        const branch2 = sessionFor("000000000000000000000024", String(new mongoose.Types.ObjectId()));
+        const branch1 = await sessionFor("000000000000000000000023", String(new mongoose.Types.ObjectId()));
+        const branch2 = await sessionFor("000000000000000000000024", String(new mongoose.Types.ObjectId()));
         const held = await holdBill([{ productId: idH, qty: 1, lineType: "ready" }], {}, branch1);
         assert.equal(held.status, 201);
         assert.equal((await call("GET", `/api/sales/${held.body.id}`, undefined, branch2)).status, 403);

@@ -5,6 +5,7 @@ import { hashPassword } from "../src/lib/auth/password";
 import { ROLE_LABELS } from "../src/lib/auth/roles";
 import type { UserRole } from "../src/lib/types";
 import mongoose from "mongoose";
+import { assertLocalOnlyTarget } from "./lib/dbSafety";
 
 function env(name: string, fallback: string): string {
   const v = process.env[name]?.trim();
@@ -98,6 +99,8 @@ async function upsertUser(
 }
 
 async function main() {
+  // Destructive: local databases only — refuses Atlas/remote/unset targets, no override.
+  assertLocalOnlyTarget("bootstrap-rbac");
   await ensureAuthBootstrap();
   await connectDB();
 

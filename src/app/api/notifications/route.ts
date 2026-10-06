@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import mongoose from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Notification } from "@/lib/models";
 import { buildAlerts } from "@/lib/notifications/alerts";
@@ -75,7 +76,7 @@ export async function PATCH(req: Request) {
     if (access !== null && isAuthResponse(access)) return access;
 
     await connectDB();
-    const body = await req.json().catch(() => ({}));
+    const body = (await req.json().catch(() => null)) ?? {};
 
     if (body.all) {
       await Notification.updateMany({ read: false }, { $set: { read: true } });
@@ -85,6 +86,9 @@ export async function PATCH(req: Request) {
     const id = String(body.id || "");
     if (!id) {
       return NextResponse.json({ error: "id or all is required" }, { status: 400 });
+    }
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid notification id" }, { status: 400 });
     }
     await Notification.updateOne({ _id: id }, { $set: { read: true } });
     return NextResponse.json({ ok: true });

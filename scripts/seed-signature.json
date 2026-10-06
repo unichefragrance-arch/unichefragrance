@@ -1,0 +1,671 @@
+{
+ "products": {
+  "count": 33,
+  "keys": [
+   "sku",
+   "name"
+  ],
+  "signatures": [
+   {
+    "sku": "BP-001",
+    "name": "Aventus Inspired"
+   },
+   {
+    "sku": "SG-001",
+    "name": "U-niche Noir"
+   },
+   {
+    "sku": "PO-012",
+    "name": "Oud Cambodi Oil"
+   },
+   {
+    "sku": "SN-004",
+    "name": "Rose Absolute"
+   },
+   {
+    "sku": "RM-STD",
+    "name": "Remix 100ml Standard"
+   },
+   {
+    "sku": "ETH-96",
+    "name": "Ethanol 96%"
+   },
+   {
+    "sku": "ETH-99",
+    "name": "Ethanol 99%"
+   },
+   {
+    "sku": "BOT-30",
+    "name": "Glass Bottle 30ml"
+   },
+   {
+    "sku": "BOT-50",
+    "name": "Glass Bottle 50ml"
+   },
+   {
+    "sku": "BOT-100",
+    "name": "Glass Bottle 100ml"
+   },
+   {
+    "sku": "BOT-100-FR",
+    "name": "Frosted Bottle 100ml"
+   },
+   {
+    "sku": "BOT-100-BK",
+    "name": "Black Bottle 100ml"
+   },
+   {
+    "sku": "CAP-STD",
+    "name": "Cap — Standard Gold"
+   },
+   {
+    "sku": "CAP-SLV",
+    "name": "Cap — Silver"
+   },
+   {
+    "sku": "CAP-BLK",
+    "name": "Cap — Matte Black"
+   },
+   {
+    "sku": "CAP-WOOD",
+    "name": "Cap — Wood Finish"
+   },
+   {
+    "sku": "ATM-STD",
+    "name": "Atomizer — Standard"
+   },
+   {
+    "sku": "ATM-LUX",
+    "name": "Atomizer — Luxury"
+   },
+   {
+    "sku": "ATM-GLD",
+    "name": "Atomizer — Gold Spray"
+   },
+   {
+    "sku": "COL-STD",
+    "name": "Collar — Standard"
+   },
+   {
+    "sku": "COL-GLD",
+    "name": "Collar — Gold"
+   },
+   {
+    "sku": "COL-SLV",
+    "name": "Collar — Silver"
+   },
+   {
+    "sku": "PCH-STD",
+    "name": "Velvet Pouch"
+   },
+   {
+    "sku": "PCH-SAT",
+    "name": "Satin Pouch"
+   },
+   {
+    "sku": "LBL-STD",
+    "name": "Label — Standard"
+   },
+   {
+    "sku": "LBL-PRM",
+    "name": "Label — Premium Foil"
+   },
+   {
+    "sku": "BOX-STD",
+    "name": "Carton Box — Standard"
+   },
+   {
+    "sku": "FIX-STD",
+    "name": "Fixative — Standard"
+   },
+   {
+    "sku": "FIX-PRM",
+    "name": "Fixative — Premium"
+   },
+   {
+    "sku": "BM-003",
+    "name": "Citrus Mist 200ml"
+   },
+   {
+    "sku": "BK-002",
+    "name": "Bakhoor Royal Mix"
+   },
+   {
+    "sku": "PO-001",
+    "name": "White Musk Oil"
+   },
+   {
+    "sku": "GB-001",
+    "name": "Gift Box — Duo"
+   }
+  ]
+ },
+ "customers": {
+  "count": 5,
+  "keys": [
+   "phone",
+   "name"
+  ],
+  "signatures": [
+   {
+    "phone": "+971 50 123 4567",
+    "name": "Fatima Al Mazrouei"
+   },
+   {
+    "phone": "+971 55 987 1122",
+    "name": "Omar Hassan"
+   },
+   {
+    "phone": "+971 4 330 8899",
+    "name": "Noor Trading LLC"
+   },
+   {
+    "phone": "+971 52 441 7788",
+    "name": "Sara Khalid"
+   },
+   {
+    "phone": "+971 58 220 3344",
+    "name": "Walk-in Customer"
+   }
+  ]
+ },
+ "suppliers": {
+  "count": 4,
+  "keys": [
+   "name",
+   "email"
+  ],
+  "signatures": [
+   {
+    "name": "Al Rawdah Oils"
+   },
+   {
+    "name": "Cambodia Direct"
+   },
+   {
+    "name": "Fragrance Hub"
+   },
+   {
+    "name": "Packaging Gulf"
+   }
+  ]
+ },
+ "formulas": {
+  "count": 6,
+  "keys": [
+   "name"
+  ],
+  "signatures": [
+   {
+    "name": "Remix Standard 100ml"
+   },
+   {
+    "name": "Fatima — Amber Oud Remix"
+   },
+   {
+    "name": "Sara — Soft Floral"
+   },
+   {
+    "name": "Pure Oil — 1 Tola Standard"
+   },
+   {
+    "name": "Bakhoor Royal — Jar Pack"
+   },
+   {
+    "name": "Legacy Attar Sample — Retired"
+   }
+  ]
+ },
+ "purchaseorders": {
+  "count": 4,
+  "keys": [
+   "number",
+   "poNumber",
+   "reference"
+  ],
+  "signatures": [
+   {},
+   {},
+   {},
+   {}
+  ]
+ },
+ "quotations": {
+  "count": 7,
+  "keys": [
+   "number"
+  ],
+  "signatures": [
+   {
+    "number": "QT-2026-018"
+   },
+   {
+    "number": "QT-2026-019"
+   },
+   {
+    "number": "QT-2026-015"
+   },
+   {
+    "number": "QT-2026-011"
+   },
+   {
+    "number": "QT-2026-017"
+   },
+   {
+    "number": "QT-2026-020"
+   },
+   {
+    "number": "QT-2026-021"
+   }
+  ]
+ },
+ "sales": {
+  "count": 26,
+  "keys": [
+   "customerPhone",
+   "total",
+   "salesperson"
+  ],
+  "signatures": [
+   {
+    "customerPhone": "+971 52 441 7788",
+    "total": 150,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 58 220 3344",
+    "total": 280,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 55 987 1122",
+    "total": 222,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 4 330 8899",
+    "total": 4200,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 50 123 4567",
+    "total": 135,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 58 220 3344",
+    "total": 4200,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 4 330 8899",
+    "total": 1800,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 52 441 7788",
+    "total": 960,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 58 220 3344",
+    "total": 3800,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 4 330 8899",
+    "total": 2200,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 52 441 7788",
+    "total": 1100,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 58 220 3344",
+    "total": 5100,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 4 330 8899",
+    "total": 900,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 52 441 7788",
+    "total": 1400,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 58 220 3344",
+    "total": 4600,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 4 330 8899",
+    "total": 3100,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 52 441 7788",
+    "total": 880,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 58 220 3344",
+    "total": 2900,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 4 330 8899",
+    "total": 1500,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 52 441 7788",
+    "total": 720,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 58 220 3344",
+    "total": 6400,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 4 330 8899",
+    "total": 800,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 52 441 7788",
+    "total": 1680,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 58 220 3344",
+    "total": 5800,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 4 330 8899",
+    "total": 1200,
+    "salesperson": "Ahmad Ibrahim"
+   },
+   {
+    "customerPhone": "+971 52 441 7788",
+    "total": 1520,
+    "salesperson": "Ahmad Ibrahim"
+   }
+  ]
+ },
+ "expenses": {
+  "count": 4,
+  "keys": [
+   "detail",
+   "amount"
+  ],
+  "signatures": [
+   {
+    "detail": "Cleaning supplies",
+    "amount": 85
+   },
+   {
+    "detail": "DEWA estimate",
+    "amount": 620
+   },
+   {
+    "detail": "Instagram boost",
+    "amount": 250
+   },
+   {
+    "detail": "Courier labels",
+    "amount": 40
+   }
+  ]
+ },
+ "appsettings": {
+  "count": 1,
+  "keys": [
+   "key",
+   "currentUserName"
+  ],
+  "signatures": [
+   {
+    "key": "default",
+    "currentUserName": "Ahmad Ibrahim"
+   }
+  ]
+ },
+ "users": {
+  "count": 6,
+  "keys": [
+   "email",
+   "role"
+  ],
+  "signatures": [
+   {
+    "email": "owner@unich.local",
+    "role": "owner"
+   },
+   {
+    "email": "admin@unich.local",
+    "role": "manager"
+   },
+   {
+    "email": "sales@unich.local",
+    "role": "cashier"
+   },
+   {
+    "email": "accounts@unich.local",
+    "role": "accountant"
+   },
+   {
+    "email": "inventory@unich.local",
+    "role": "inventory"
+   },
+   {
+    "email": "branchmanager@unich.local",
+    "role": "branch_manager"
+   }
+  ]
+ },
+ "branches": {
+  "count": 1,
+  "keys": [
+   "code",
+   "name"
+  ],
+  "signatures": [
+   {
+    "code": "MAIN",
+    "name": "Main Store — Muscat"
+   }
+  ]
+ },
+ "fifolayers": {
+  "count": 35,
+  "keys": [
+   "supplierName",
+   "qtyRemaining",
+   "unitCost"
+  ],
+  "signatures": [
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 12400,
+    "unitCost": 0.045
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 8000,
+    "unitCost": 0.06
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 280,
+    "unitCost": 1.2
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 260,
+    "unitCost": 1.8
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 320,
+    "unitCost": 2.4
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 180,
+    "unitCost": 3.1
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 150,
+    "unitCost": 3.4
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 410,
+    "unitCost": 0.85
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 360,
+    "unitCost": 0.85
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 300,
+    "unitCost": 0.95
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 140,
+    "unitCost": 1.6
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 380,
+    "unitCost": 1.1
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 200,
+    "unitCost": 1.8
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 220,
+    "unitCost": 1.5
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 355,
+    "unitCost": 0.6
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 240,
+    "unitCost": 0.75
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 230,
+    "unitCost": 0.75
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 210,
+    "unitCost": 1.5
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 190,
+    "unitCost": 1.3
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 800,
+    "unitCost": 0.35
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 400,
+    "unitCost": 0.7
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 320,
+    "unitCost": 0.9
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 5000,
+    "unitCost": 0.12
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 2500,
+    "unitCost": 0.22
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 4,
+    "unitCost": 22
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 27,
+    "unitCost": 38
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 56,
+    "unitCost": 12
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 42,
+    "unitCost": 98.2
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 48,
+    "unitCost": 5.1
+   },
+   {
+    "supplierName": "Packaging Gulf",
+    "qtyRemaining": 92,
+    "unitCost": 2.1
+   },
+   {
+    "supplierName": "Al Rawdah Oils",
+    "qtyRemaining": 220,
+    "unitCost": 6.8
+   },
+   {
+    "supplierName": "Cambodia Direct",
+    "qtyRemaining": 400,
+    "unitCost": 7.4
+   },
+   {
+    "supplierName": "Al Rawdah Oils",
+    "qtyRemaining": 240,
+    "unitCost": 7.55
+   },
+   {
+    "supplierName": "Fragrance Hub",
+    "qtyRemaining": 8,
+    "unitCost": 142
+   },
+   {
+    "supplierName": "Fragrance Hub",
+    "qtyRemaining": 10,
+    "unitCost": 148.5
+   }
+  ]
+ }
+}

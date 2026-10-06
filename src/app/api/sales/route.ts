@@ -3,9 +3,10 @@ import { connectDB } from "@/lib/db";
 import { Sale } from "@/lib/models";
 import { createSale } from "@/lib/sales/createSale";
 import { SaleError } from "@/lib/sales/errors";
-import { warmSaleCaches } from "@/lib/sales/validateSale";
+import { parseCheckoutBody } from "@/lib/sales/requestShape";
+import { warmSaleCaches, type IncomingSaleLine } from "@/lib/sales/validateSale";
 import { toJSON, toJSONList } from "@/lib/serialize";
-import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { isAuthResponse, isDbUnavailable, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { branchScopeFilter } from "@/lib/auth/guards";
 import { canViewCostPrices } from "@/lib/auth/roles";
 import { recordAudit } from "@/lib/audit/log";
@@ -114,14 +115,20 @@ export async function POST(req: Request) {
     const access = requireApiAccess(req);
     if (access !== null && isAuthResponse(access)) return access;
 
-    const body = await req.json();
+    let raw: unknown;
+    try {
+      raw = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Request body must be valid JSON", code: "VALIDATION" }, { status: 400 });
+    }
+    // Types are checked before any business logic: a malformed body is a 400,
+    // and only "completed" / "held" (or no status) may reach createSale.
+    const body = parseCheckoutBody(raw, req.headers.get("idempotency-key"));
     // Wholesale lines are charged at wholesalePrice — a cost-tier figure roles
     // like cashier may not even see — so they must not be able to apply it.
-    const hasWholesaleLine =
-      Array.isArray(body.lines) &&
-      body.lines.some(
-        (l: { lineType?: unknown }) => l?.lineType === "wholesale",
-      );
+    const hasWholesaleLine = body.lines.some(
+      (l) => (l as { lineType?: unknown }).lineType === "wholesale",
+    );
     if (hasWholesaleLine && (!access || !canViewCostPrices(access.role))) {
       return NextResponse.json(
         {
@@ -131,7 +138,6 @@ export async function POST(req: Request) {
         { status: 403 },
       );
     }
-    const headerKey = req.headers.get("idempotency-key") || undefined;
     const { sale, deduplicated, timingMs } = await createSale({
       customerPhone: body.customerPhone,
       customerName: body.customerName,
@@ -139,15 +145,15 @@ export async function POST(req: Request) {
       salesperson: body.salesperson,
       payment: body.payment,
       paymentBreakdown: body.paymentBreakdown,
-      lines: body.lines,
+      lines: body.lines as IncomingSaleLine[],
       invoiceDiscount: body.invoiceDiscount,
       actor: access
         ? { userId: access.userId, name: access.name, role: access.role }
         : null,
       discountApprovalToken: body.discountApprovalToken,
       status: body.status,
-      resumedFromId: typeof body.resumedFromId === "string" ? body.resumedFromId : undefined,
-      idempotencyKey: body.idempotencyKey || headerKey,
+      resumedFromId: body.resumedFromId,
+      idempotencyKey: body.idempotencyKey,
       branchId: access?.branchId ?? undefined,
       branchName: access?.branchName ?? undefined,
     });
@@ -201,12 +207,24 @@ export async function POST(req: Request) {
         error.code === "DISCOUNT_NOT_AUTHORIZED" ||
         error.code === "PRICE_FLOOR_APPROVAL_REQUIRED");
     // POS-098: the resumed held bill was completed/discarded elsewhere → 409.
-    const isConflict = error instanceof SaleError && error.code === "HELD_BILL_UNAVAILABLE";
-    const status = isConflict ? 409 : isDiscountDenied ? 403 : isClientError ? 400 : 500;
+    // POS-154: this user's key already made a sale with a different bill → 409.
+    const isConflict =
+      error instanceof SaleError &&
+      (error.code === "HELD_BILL_UNAVAILABLE" || error.code === "IDEMPOTENCY_CONFLICT");
+    const status = isConflict
+      ? 409
+      : isDiscountDenied
+        ? 403
+        : isClientError
+          ? 400
+          : isDbUnavailable(error)
+            ? 503
+            : 500;
     return NextResponse.json(
       {
         error: message,
         code: error instanceof SaleError ? error.code : "UNKNOWN",
+        ...(error instanceof SaleError ? error.details : {}),
       },
       { status },
     );

@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
 import { connectDB } from "../../src/lib/db";
 import { AppSettings, Branch, Formula, Product, Sale, User, FifoLayer } from "../../src/lib/models";
-import { createSessionToken } from "../../src/lib/auth/session";
+import { testSessionCookie } from "../../src/lib/auth/testSession";
 
 assertLocalDb();
 const BASE = "http://localhost:3951";
@@ -33,7 +33,7 @@ async function main() {
   const u = async (role: string) => (await User.findOne({ role }).lean<any>())!;
   const cookie = async (role: string, userId?: string) => {
     const x = await u(role);
-    return `unich_session=${createSessionToken({ userId: userId ?? String(x._id), name: x.name, email: x.email, role: role as any, roleLabel: role, branchId: String(branch._id), branchName: branch.name })}`;
+    return (await testSessionCookie({ userId: userId ?? String(x._id), name: x.name, email: x.email, role: role as any, roleLabel: role, branchId: String(branch._id), branchName: branch.name }));
   };
   const ck = { owner: await cookie("owner"), manager: await cookie("manager"), cashier: await cookie("cashier"), cashier2: await cookie("cashier", String(new mongoose.Types.ObjectId())), bm: await cookie("branch_manager"), acc: await cookie("accountant") };
   await AppSettings.updateOne({ key: "default" }, { $set: { salespeople: [A, B, C], activeSalesperson: A, vatPercent: 0 } });
@@ -102,7 +102,8 @@ async function main() {
       const key = randomUUID();
       const phone = String(++ph);
       const rs = await Promise.all(Array.from({ length: 20 }, () => req("POST", "/api/sales", ck.cashier, { customerPhone: phone, payment: "cash", salesperson: C, lines: [{ productId: String(p0._id), qty: 1, lineType: "ready" }], idempotencyKey: key })));
-      const docs = await Sale.find({ idempotencyKey: key }).lean<any[]>();
+      // Stored keys are scoped per user + branch (POS-146b): match on the client key part.
+      const docs = await Sale.find({ idempotencyKey: { $regex: `\\|k:${key}$` } }).lean<any[]>();
       rec("same bill fired 20× → one sale under C", docs.length === 1 && docs[0].salesperson === C && rs.every((r) => r.status < 300), `sales=${docs.length} salesperson=${docs[0]?.salesperson}`);
     }
 

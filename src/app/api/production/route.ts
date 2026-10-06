@@ -9,7 +9,7 @@ import { mapProductionOrder } from "@/lib/production/mapProduction";
 import { SaleError } from "@/lib/sales/errors";
 import { ProductionOrder } from "@/lib/models";
 import { toJSON, toJSONList } from "@/lib/serialize";
-import { isAuthResponse, requireApiAccess } from "@/lib/auth/apiGuard";
+import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
 export async function GET(req: Request) {
   try {
@@ -39,9 +39,7 @@ export async function GET(req: Request) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to load production orders",
+          safeErrorMessage(error, "Failed to load production orders"),
       },
       { status: 500 },
     );
@@ -91,9 +89,7 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to create production order",
+          safeErrorMessage(error, "Failed to create production order"),
       },
       { status: 400 },
     );

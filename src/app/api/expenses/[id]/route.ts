@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import { Expense } from "@/lib/models";
@@ -13,6 +14,9 @@ export async function PUT(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid expense id" }, { status: 400 });
+    }
     const body = await req.json();
     if (body.date) body.date = new Date(body.date);
     const expense = await Expense.findByIdAndUpdate(id, body, {
@@ -38,6 +42,9 @@ export async function DELETE(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid expense id" }, { status: 400 });
+    }
     const expense = await Expense.findByIdAndDelete(id);
     if (!expense) {
       return NextResponse.json({ error: "Expense not found" }, { status: 404 });

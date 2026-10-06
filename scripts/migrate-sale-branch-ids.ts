@@ -9,6 +9,7 @@ try {
 }
 
 import mongoose from "mongoose";
+import { migrationMode } from "./lib/dbSafety";
 import { connectDB } from "../src/lib/db";
 import { Sale } from "../src/lib/models";
 
@@ -16,10 +17,11 @@ import { Sale } from "../src/lib/models";
  * One-off: POS checkouts used to store `sales.branchId` as a string, while
  * every report and branch filter matches on ObjectId — so branch-scoped
  * reports showed 0 for POS sales. Converts string ids to ObjectId in place.
- * Idempotent; dry run by default — pass --apply to write.
+ * Idempotent; dry run by default — pass --apply --confirm-db=<name> to write.
  */
 async function main() {
-  const apply = process.argv.includes("--apply");
+  // Dry run unless --apply --confirm-db=<name>.
+  const { apply } = migrationMode("migrate-sale-branch-ids");
   await connectDB();
 
   const filter = { branchId: { $type: "string" } };

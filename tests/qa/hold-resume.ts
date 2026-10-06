@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
 import { connectDB } from "../../src/lib/db";
 import { AppSettings, Branch, Customer, FifoLayer, Product, Sale, User } from "../../src/lib/models";
-import { createSessionToken } from "../../src/lib/auth/session";
+import { testSessionCookie } from "../../src/lib/auth/testSession";
 
 assertLocalDb();
 const BASE = "http://localhost:3953";
@@ -38,7 +38,7 @@ async function main() {
   const otherBranch = String(new mongoose.Types.ObjectId());
   const mk = async (role: string, branchId: string | null, userId?: string) => {
     const u = (await User.findOne({ role }).lean<any>())!;
-    return `unich_session=${createSessionToken({ userId: userId ?? String(u._id), name: u.name, email: u.email, role: role as any, roleLabel: role, branchId, branchName: branch.name })}`;
+    return (await testSessionCookie({ userId: userId ?? String(u._id), name: u.name, email: u.email, role: role as any, roleLabel: role, branchId, branchName: branch.name }));
   };
   const ck = {
     cashier: await mk("cashier", String(branch._id)),

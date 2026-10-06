@@ -15,6 +15,7 @@ try {
 import mongoose from "mongoose";
 import { connectDB } from "../src/lib/db";
 import { FifoLayer, Product, Supplier } from "../src/lib/models";
+import { assertLocalOnlyTarget } from "./lib/dbSafety";
 
 /** Seed stock + cost defaults keyed by SKU. */
 const STOCK_RESET: Record<
@@ -63,6 +64,8 @@ const STOCK_RESET: Record<
 };
 
 async function main() {
+  // Destructive: local databases only — refuses Atlas/remote/unset targets, no override.
+  assertLocalOnlyTarget("reset-catalog-stock");
   console.log("Connecting…");
   await connectDB();
 

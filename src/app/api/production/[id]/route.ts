@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { NextResponse } from "next/server";
 import {
   isFormulaAdminResponse,
@@ -22,6 +23,9 @@ export async function GET(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid production order id" }, { status: 400 });
+    }
     const order = await ProductionOrder.findById(id).lean();
     if (!order) {
       return NextResponse.json(
@@ -54,6 +58,9 @@ export async function DELETE(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid production order id" }, { status: 400 });
+    }
     const order = await ProductionOrder.findById(id);
     if (!order) {
       return NextResponse.json(
@@ -90,9 +97,7 @@ export async function DELETE(req: Request, ctx: Ctx) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to cancel production order",
+          safeErrorMessage(error, "Failed to cancel production order"),
       },
       { status: 400 },
     );

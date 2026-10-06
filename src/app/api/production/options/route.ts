@@ -6,7 +6,7 @@ import {
 import { connectDB } from "@/lib/db";
 import { formulaNeedsOilSelection } from "@/lib/production/planProduction";
 import { Formula, Product } from "@/lib/models";
-import { isAuthResponse, requireApiAccess } from "@/lib/auth/apiGuard";
+import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
 /**
  * Approved formulas + finished-goods SKUs for the production order form.
@@ -78,9 +78,7 @@ export async function GET(req: Request) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to load production options",
+          safeErrorMessage(error, "Failed to load production options"),
       },
       { status: 500 },
     );

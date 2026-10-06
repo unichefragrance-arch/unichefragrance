@@ -10,7 +10,8 @@ import {
 } from "@/lib/sales/discountApproval";
 import { SaleError } from "@/lib/sales/errors";
 import { checkPriceFloor, needsAdminForFloor, priceFloorMessage } from "@/lib/sales/priceFloor";
-import { validateSaleLines } from "@/lib/sales/validateSale";
+import { isPlainObject } from "@/lib/sales/requestShape";
+import { validateSaleLines, type IncomingSaleLine } from "@/lib/sales/validateSale";
 
 /**
  * POS-071/072: a manager approves an over-limit discount for THIS cart.
@@ -27,11 +28,17 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json();
+    if (!isPlainObject(body) || !Array.isArray(body.lines) || !body.lines.every(isPlainObject)) {
+      return NextResponse.json(
+        { error: "Request body must be an object with a list of line items", code: "VALIDATION" },
+        { status: 400 },
+      );
+    }
     // Server prices, same as checkout — the % approved is the % that will be charged.
-    const validated = await validateSaleLines(body.lines);
+    const validated = await validateSaleLines(body.lines as IncomingSaleLine[]);
     const breakdown = discountsFor(
       validated.lines,
-      body.lines,
+      body.lines as IncomingSaleLine[],
       body.invoiceDiscount,
       validated.subtotal,
     );
@@ -63,7 +70,7 @@ export async function POST(req: Request) {
       breakdown,
       actor,
       approver,
-      fingerprint: cartFingerprint(body.lines, body.invoiceDiscount),
+      fingerprint: cartFingerprint(body.lines as IncomingSaleLine[], body.invoiceDiscount),
     });
 
     recordAudit({

@@ -36,6 +36,8 @@ export type AuthMe = {
   authenticated: boolean;
   user: AppUser | null;
   permissions: string[];
+  /** Database unreachable: identity is from the signed cookie, not re-verified. */
+  degraded?: boolean;
 };
 
 export type ProductCategory =

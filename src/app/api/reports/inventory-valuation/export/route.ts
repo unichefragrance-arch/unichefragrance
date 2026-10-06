@@ -8,7 +8,7 @@ import {
   buildInventoryValuationCsv,
   parseValuationBucket,
 } from "@/lib/reports/inventoryValuation";
-import { isAuthResponse, requireApiAccess } from "@/lib/auth/apiGuard";
+import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
 export const runtime = "nodejs";
 
@@ -57,9 +57,7 @@ export async function GET(req: Request) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to export inventory valuation",
+          safeErrorMessage(error, "Failed to export inventory valuation"),
       },
       { status: 500 },
     );

@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
 import { connectDB } from "../../src/lib/db";
 import { AppSettings, Branch, Customer, FifoLayer, Formula, Product, Sale, User } from "../../src/lib/models";
-import { createSessionToken } from "../../src/lib/auth/session";
+import { testSessionCookie } from "../../src/lib/auth/testSession";
 
 assertLocalDb();
 const BASE = "http://localhost:3956";
@@ -32,7 +32,7 @@ async function main() {
   const branch = (await Branch.findOne().lean<any>())!;
   const mk = async (role: string) => {
     const u = (await User.findOne({ role }).lean<any>())!;
-    return `unich_session=${createSessionToken({ userId: String(u._id), name: u.name, email: u.email, role: role as any, roleLabel: role, branchId: String(branch._id), branchName: branch.name })}`;
+    return (await testSessionCookie({ userId: String(u._id), name: u.name, email: u.email, role: role as any, roleLabel: role, branchId: String(branch._id), branchName: branch.name }));
   };
   const roles = ["owner", "manager", "branch_manager", "cashier", "accountant", "inventory"] as const;
   const ck = Object.fromEntries(await Promise.all(roles.map(async (r) => [r, await mk(r)]))) as Record<(typeof roles)[number], string>;
@@ -114,7 +114,7 @@ async function main() {
       `PUT {creditBalance:0,totalPurchases:999999} by role → ${JSON.stringify(edits)}; balance now ${after.creditBalance} (was ${cust.creditBalance}), totalPurchases ${after.totalPurchases}`);
     const neg = await req("PUT", `/api/customers/${cust._id}`, ck.cashier, { creditBalance: -5000 });
     rec("Financial", "negative credit balance attempt has no effect (field ignored)", (await Customer.findById(cust._id).lean<any>()).creditBalance === after.creditBalance, `HTTP ${neg.status}, balance ${(await Customer.findById(cust._id).lean<any>()).creditBalance}`);
-    const otherBranchCk = `unich_session=${createSessionToken({ userId: String(new mongoose.Types.ObjectId()), name: "Other", email: "o@x", role: "cashier", roleLabel: "cashier", branchId: String(new mongoose.Types.ObjectId()), branchName: "Other" })}`;
+    const otherBranchCk = (await testSessionCookie({ userId: String(new mongoose.Types.ObjectId()), name: "Other", email: "o@x", role: "cashier", roleLabel: "cashier", branchId: String(new mongoose.Types.ObjectId()), branchName: "Other" }));
     const ob = await req("PUT", `/api/customers/${cust._id}`, otherBranchCk, { creditBalance: 1 });
     rec("Security", "customer edit from another branch", "OBS", `HTTP ${ob.status} (customers are shared across branches — no rule defined)`);
     const un = await req("PUT", `/api/customers/${cust._id}`, undefined, { creditBalance: 1 });

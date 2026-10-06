@@ -12,13 +12,13 @@
  * Requires: DATABASE_URL + SESSION_SECRET in the environment (loaded via
  * `tsx --env-file=.env`). This writes and deletes real documents, so it
  * refuses to run unless DATABASE_URL points at localhost (see e2eGuard);
- * set E2E_ALLOW_REMOTE_DB=1 only for a dedicated dev/staging DB.
+ * there is no override for remote databases.
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { connectDB } from "../db";
 import { Product, Supplier, PurchaseOrder, FifoLayer } from "../models";
-import { createSessionToken } from "../auth/session";
+import { testSessionCookie } from "../auth/testSession";
 import { assertLocalDb } from "../e2eGuard";
 
 const PORT = Number(process.env.E2E_PORT || 3911);
@@ -104,7 +104,7 @@ async function main() {
     stockSellable: 0,
   });
 
-  const token = createSessionToken({
+  const cookie = await testSessionCookie({
     userId: "000000000000000000000000",
     name: "E2E Test Runner",
     email: "e2e-runner@test.local",
@@ -113,7 +113,6 @@ async function main() {
     branchId: null,
     branchName: null,
   });
-  const cookie = `unich_session=${token}`;
 
   const server = startServer();
   let createdPurchaseId: string | null = null;

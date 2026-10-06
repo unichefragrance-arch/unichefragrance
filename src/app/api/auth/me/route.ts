@@ -2,16 +2,21 @@ import { NextResponse } from "next/server";
 import { safeErrorMessage } from "@/lib/auth/apiGuard";
 import { permissionsForRole } from "@/lib/auth/roles";
 import { getSessionFromRequest } from "@/lib/auth/session";
+import { checkSession } from "@/lib/auth/sessionStore";
 import type { AuthMe } from "@/lib/types";
 
 /**
- * GET /api/auth/me — cookie-only (no DB).
- * Session is HMAC-signed; role/branch come from the token so UI unlocks in <100ms.
- * Active-user checks happen at login (and on protected API writes via session).
+ * GET /api/auth/me — signed cookie + a cached live-session check (revoked,
+ * deactivated or demoted sessions report as signed out). If the database is
+ * unreachable the signed cookie is still reported (degraded) — an outage must
+ * not look like a logout to the client.
  */
 export async function GET(req: Request) {
   try {
-    const session = getSessionFromRequest(req);
+    const parsed = getSessionFromRequest(req);
+    // Revoked / deactivated / demoted sessions report as signed out.
+    const check = parsed ? await checkSession(parsed) : "dead";
+    const session = check === "dead" ? null : parsed;
     if (!session) {
       const body: AuthMe = {
         authenticated: false,
@@ -34,6 +39,7 @@ export async function GET(req: Request) {
         active: true,
       },
       permissions: permissionsForRole(session.role),
+      ...(check === "unavailable" ? { degraded: true } : {}),
     };
     return NextResponse.json(body);
   } catch (error) {

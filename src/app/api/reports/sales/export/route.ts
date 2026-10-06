@@ -9,7 +9,7 @@ import {
   buildSaleReportExcel,
   type SaleReportStatus,
 } from "@/lib/reports/salesReport";
-import { isAuthResponse, requireApiAccess } from "@/lib/auth/apiGuard";
+import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { branchScopeFilter } from "@/lib/auth/guards";
 
 export const runtime = "nodejs";
@@ -52,9 +52,7 @@ export async function GET(req: Request) {
     return NextResponse.json(
       {
         error:
-          error instanceof Error
-            ? error.message
-            : "Failed to export sales report",
+          safeErrorMessage(error, "Failed to export sales report"),
       },
       { status: 500 },
     );

@@ -15,6 +15,8 @@ export type AppSession = {
   branchId: string | null;
   branchName: string | null;
   exp: number;
+  /** Server-side session id (AuthSession) — lets one login be revoked. */
+  sid?: string;
 };
 
 function safeEqual(a: string, b: string): boolean {
@@ -54,6 +56,7 @@ export function createSessionToken(
     branchId: input.branchId,
     branchName: input.branchName,
     exp: input.exp ?? Date.now() + COOKIE_MAX_AGE_SEC * 1000,
+    ...(input.sid ? { sid: input.sid } : {}),
   };
   const payloadB64 = Buffer.from(JSON.stringify(session), "utf8").toString(
     "base64url",
@@ -90,6 +93,7 @@ export function parseSessionToken(
       branchId: session.branchId ? String(session.branchId) : null,
       branchName: session.branchName ? String(session.branchName) : null,
       exp: session.exp,
+      ...(session.sid ? { sid: String(session.sid) } : {}),
     };
   } catch {
     return null;

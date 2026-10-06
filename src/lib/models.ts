@@ -945,6 +945,24 @@ DiscountApprovalSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 30 * 24 * 3
 export const DiscountApproval =
   models.DiscountApproval || model("DiscountApproval", DiscountApprovalSchema);
 
+/**
+ * Server-side record of each login session (the cookie carries only its sid).
+ * Logout revokes one session; the proxy rejects revoked/expired sessions and
+ * sessions whose user was deactivated or had role/branch changed.
+ */
+const AuthSessionSchema = new Schema(
+  {
+    sid: { type: String, required: true, unique: true },
+    userId: { type: String, required: true, index: true },
+    expiresAt: { type: Date, required: true },
+    revokedAt: { type: Date, default: null },
+  },
+  { timestamps: true },
+);
+AuthSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+export const AuthSession = models.AuthSession || model("AuthSession", AuthSessionSchema);
+
 /** Login rate-limit sliding window — one document per key (ip:X or email:X). */
 const RateLimitSchema = new Schema({
   key: { type: String, required: true, unique: true },

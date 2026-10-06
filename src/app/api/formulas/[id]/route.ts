@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { NextResponse } from "next/server";
 import {
   isFormulaAdminResponse,
@@ -63,6 +64,9 @@ export async function PUT(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid formula id" }, { status: 400 });
+    }
     const body = (await req.json()) as Record<string, unknown>;
     const nextStatus = body.status as FormulaStatus | undefined;
     const contentTouched = isContentTouched(body);
@@ -379,6 +383,9 @@ export async function DELETE(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid formula id" }, { status: 400 });
+    }
     const formula = await Formula.findByIdAndDelete(id).lean();
     if (!formula) {
       return NextResponse.json({ error: "Formula not found" }, { status: 404 });

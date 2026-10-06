@@ -9,6 +9,7 @@ try {
 }
 
 import mongoose from "mongoose";
+import { migrationMode } from "./lib/dbSafety";
 import { connectDB } from "../src/lib/db";
 import { AppSettings, FifoLayer, PurchaseOrder, Supplier } from "../src/lib/models";
 
@@ -26,6 +27,8 @@ const MODELS = [
 ] as const;
 
 async function main() {
+  // Dry run unless --apply --confirm-db=<name>.
+  const { apply } = migrationMode("migrate-currency-omr");
   await connectDB();
 
   console.log("Before:");
@@ -34,6 +37,14 @@ async function main() {
       { $group: { _id: "$currency", count: { $sum: 1 } } },
     ]);
     console.log(`  ${name}:`, counts);
+  }
+
+  if (!apply) {
+    for (const { name, model } of MODELS) {
+      console.log(`[dry run] ${name}: ${await model.countDocuments({ currency: "AED" })} would be updated AED -> OMR`);
+    }
+    await mongoose.disconnect();
+    return;
   }
 
   console.log("\nUpdating AED -> OMR:");

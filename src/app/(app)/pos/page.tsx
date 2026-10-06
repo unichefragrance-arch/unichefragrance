@@ -46,6 +46,11 @@ import { receiptText } from "@/lib/receipt/text";
 import { renderReceiptHtml } from "@/lib/receipt/template";
 import type { ReceiptFormat, ReceiptLine } from "@/lib/receipt/types";
 import { OIL_BASE_PRODUCT_ID, matchRemixRole } from "@/lib/sales/constants";
+import {
+  checkoutFailureMessage,
+  classifyCheckoutError,
+  keepCheckoutKey,
+} from "@/lib/sales/checkoutRecovery";
 import { resolveSearchPick } from "@/lib/sales/posSearch";
 import {
   clampDiscount,
@@ -440,7 +445,7 @@ function PosPageInner() {
     floorMessage?: string;
   } | null>(null);
   const [approvingDiscount, setApprovingDiscount] = useState(false);
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   const discountLimit = discountLimitFor(user?.role);
   const [payment, setPayment] = useState<PaymentMethod>("cash");
   const [mixedOpen, setMixedOpen] = useState(false);
@@ -602,6 +607,13 @@ function PosPageInner() {
   /** Keep collapsed so Previous Orders never push Complete off-screen. */
   const [customerExtrasOpen, setCustomerExtrasOpen] = useState(false);
   const sendInFlight = useRef(new Set<string>());
+  /**
+   * POS-154: one idempotency key per bill, kept until the bill's outcome is
+   * known — even if the cart is edited after a lost response. The server then
+   * returns the sale it already made (same bill) or refuses with 409 (changed
+   * bill); it never makes a second sale. Cleared on success or that 409.
+   */
+  const checkoutKeyRef = useRef<string | null>(null);
   const [packagingPick, setPackagingPick] = useState<
     Partial<Record<PackagingGroup, string>>
   >({});
@@ -1266,7 +1278,8 @@ function PosPageInner() {
       return;
     }
     setCheckingOut(true);
-    const idempotencyKey = createIdempotencyKey();
+    if (!checkoutKeyRef.current) checkoutKeyRef.current = createIdempotencyKey();
+    const idempotencyKey = checkoutKeyRef.current;
     const snapshot = {
       cart,
       packagingPick,
@@ -1322,6 +1335,7 @@ function PosPageInner() {
       });
       setApproval(null);
       setResumedFromId(null);
+      checkoutKeyRef.current = null; // next bill gets a fresh key
       // POS-112/115: what the server recorded — print / WhatsApp must match the sale.
       const completed: LastSale = {
         id: sale.id,
@@ -1364,8 +1378,18 @@ function PosPageInner() {
       void reload({ silent: true });
       window.setTimeout(() => searchRef.current?.focus(), 100);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Could not complete sale";
+      const failure = classifyCheckoutError(
+        err,
+        typeof navigator === "undefined" ? true : navigator.onLine,
+      );
+      if (!keepCheckoutKey(failure)) checkoutKeyRef.current = null;
+      const message = checkoutFailureMessage(
+        failure,
+        err instanceof Error ? err.message : "Could not complete sale",
+        (err as { data?: { saleId?: string } }).data?.saleId,
+      );
       const code = (err as { data?: { code?: string } }).data?.code;
+      if (failure === "conflict") void reload({ silent: true });
       if (code === "HELD_BILL_UNAVAILABLE") {
         // Completed or discarded on another till — completing this copy too
         // would duplicate the sale, so drop it.
@@ -2821,13 +2845,12 @@ function PosPageInner() {
                 onChange={(e) => {
                   const on = e.target.checked;
                   setPrintAfterComplete(on);
-                  if (settings.data) {
+                  // Send only this field: a full (stale) settings copy would
+                  // undo changes saved elsewhere. Cashiers can't save settings.
+                  if (settings.data && hasPermission("settings:write")) {
                     void api<AppSettings>("/api/settings", {
                       method: "PUT",
-                      body: JSON.stringify({
-                        ...settings.data,
-                        autoPrintReceipt: on,
-                      }),
+                      body: JSON.stringify({ autoPrintReceipt: on }),
                     })
                       .then((updated) => settings.setData(updated))
                       .catch(() => undefined);

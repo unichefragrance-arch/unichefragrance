@@ -27,6 +27,7 @@ import {
 import { hashPassword } from "../src/lib/auth/password";
 import { ROLE_LABELS } from "../src/lib/auth/roles";
 import { computeQuotationTotals } from "../src/lib/quotation/calc";
+import { assertLocalOnlyTarget } from "./lib/dbSafety";
 
 async function clearAll() {
   await Promise.all([
@@ -46,6 +47,8 @@ async function clearAll() {
 }
 
 async function seed() {
+  // Destructive: local databases only — refuses Atlas/remote/unset targets, no override.
+  assertLocalOnlyTarget("seed");
   console.log("Connecting to MongoDB Atlas...");
   await connectDB();
   console.log("Connected. Clearing collections...");

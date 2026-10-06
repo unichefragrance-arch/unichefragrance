@@ -28,6 +28,8 @@ const SUITES = [
   "customer-edit",
   "report-rounding",
   "inventory",
+  "pos-142b-status", // POS-142b: client cannot choose a stock-consuming sale status
+  "pos-hardening", // idempotency, payment/qty/body validation, remix oil, data integrity
 ];
 
 assertLocalDb();

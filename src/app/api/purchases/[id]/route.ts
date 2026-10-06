@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { roundMoney } from "@/lib/money";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
@@ -51,6 +52,9 @@ export async function PUT(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid purchase id" }, { status: 400 });
+    }
     const body = await req.json();
 
     const purchase = await PurchaseOrder.findById(id);
@@ -219,6 +223,9 @@ export async function DELETE(req: Request, ctx: Ctx) {
 
     await connectDB();
     const { id } = await ctx.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "Invalid purchase id" }, { status: 400 });
+    }
     const existing = await PurchaseOrder.findById(id);
     if (!existing) {
       return NextResponse.json({ error: "Purchase not found" }, { status: 404 });

@@ -12,6 +12,7 @@ import mongoose from "mongoose";
 import { connectDB } from "../src/lib/db";
 import { FifoLayer, Product, Supplier } from "../src/lib/models";
 import { matchRemixRole } from "../src/lib/sales/constants";
+import { assertLocalOnlyTarget } from "./lib/dbSafety";
 
 /** Additive packaging seed — does not wipe existing data. */
 const extras = [
@@ -278,6 +279,8 @@ const renames = [
 ];
 
 async function main() {
+  // Destructive: local databases only — refuses Atlas/remote/unset targets, no override.
+  assertLocalOnlyTarget("seed-packaging");
   await connectDB();
   let created = 0;
   let skipped = 0;

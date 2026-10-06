@@ -82,15 +82,9 @@ export async function PUT(req: Request) {
 
     await connectDB();
     const body = (await req.json()) as Record<string, unknown>;
-    const salespeople = normalizeSalespeople(
-      body.salespeople,
-      typeof body.currentUserName === "string" ? body.currentUserName : undefined,
-    );
-    const activeSalesperson = normalizeActiveSalesperson(
-      body.activeSalesperson,
-      salespeople,
-      typeof body.currentUserName === "string" ? body.currentUserName : undefined,
-    );
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return NextResponse.json({ error: "Request body must be a JSON object" }, { status: 400 });
+    }
 
     const rest = { ...body };
     delete rest.id;
@@ -98,16 +92,26 @@ export async function PUT(req: Request) {
     delete rest.__v;
     delete rest.key;
     delete rest.smsConfigured;
+    delete rest.salespeople;
+    delete rest.activeSalesperson;
+
+    // Partial update: the sales team is only rewritten when the request
+    // carries it, so saving one field (e.g. POS auto-print) can't reset it.
+    if (body.salespeople !== undefined || body.activeSalesperson !== undefined) {
+      const fallbackName =
+        typeof body.currentUserName === "string" ? body.currentUserName : undefined;
+      const current =
+        body.salespeople === undefined
+          ? await AppSettings.findOne({ key: "default" }).select("salespeople").lean<{ salespeople?: unknown }>()
+          : null;
+      const salespeople = normalizeSalespeople(body.salespeople ?? current?.salespeople, fallbackName);
+      rest.salespeople = salespeople;
+      rest.activeSalesperson = normalizeActiveSalesperson(body.activeSalesperson, salespeople, fallbackName);
+    }
 
     const settings = await AppSettings.findOneAndUpdate(
       { key: "default" },
-      {
-        $set: {
-          ...rest,
-          salespeople,
-          activeSalesperson,
-        },
-      },
+      { $set: rest },
       { returnDocument: "after", upsert: true, runValidators: true },
     );
     invalidateReceiptSettingsCache();
