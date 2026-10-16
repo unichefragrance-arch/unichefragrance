@@ -4,7 +4,6 @@ import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Customer, Expense, Product, Sale, Supplier } from "@/lib/models";
 import { salesByTender } from "@/lib/reports/tenders";
-import { moduleRoadmap } from "@/lib/constants";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { hasPermission } from "@/lib/auth/roles";
 import { resolveBranchScope } from "@/lib/reporting-engine/access";
@@ -464,7 +463,6 @@ export async function GET(req: Request) {
         topReceivables,
         topPayables,
       }),
-      moduleRoadmap,
     });
   } catch (error) {
     return NextResponse.json(

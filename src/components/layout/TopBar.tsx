@@ -2,7 +2,7 @@
 
 import { useSyncExternalStore } from "react";
 import { usePathname } from "next/navigation";
-import { Moon, Sun, Wifi } from "lucide-react";
+import { Moon, Sun, Wifi, WifiOff } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { NotificationBell } from "@/components/layout/NotificationBell";
 import { useTheme } from "@/components/theme/ThemeProvider";
@@ -35,6 +35,16 @@ function resolvePageTitle(pathname: string, fallback?: string) {
 
 const noopSubscribe = () => () => {};
 
+/** Browser connectivity: re-renders when the network drops or comes back. */
+function subscribeOnline(onChange: () => void) {
+  window.addEventListener("online", onChange);
+  window.addEventListener("offline", onChange);
+  return () => {
+    window.removeEventListener("online", onChange);
+    window.removeEventListener("offline", onChange);
+  };
+}
+
 export function TopBar({ title }: { title?: string }) {
   const pathname = usePathname();
   const pageTitle = resolvePageTitle(pathname, title);
@@ -51,6 +61,12 @@ export function TopBar({ title }: { title?: string }) {
     () => false,
   );
   const resolvedTheme = mounted ? theme : "dark";
+  // SSR has no network state — assume online until the browser says otherwise.
+  const online = useSyncExternalStore(
+    subscribeOnline,
+    () => navigator.onLine,
+    () => true,
+  );
 
   return (
     <header className="sticky top-0 z-20 flex h-14 items-center justify-between gap-4 border-b border-line/70 bg-canvas/80 px-6 backdrop-blur-xl">
@@ -63,13 +79,17 @@ export function TopBar({ title }: { title?: string }) {
       </div>
 
       <div className="flex items-center gap-2">
-        <Badge tone="success" className="hidden sm:inline-flex">
-          <Wifi className="h-3 w-3" />
-          Online
-        </Badge>
-        <Badge tone="gold" className="hidden lg:inline-flex">
-          Prototype
-        </Badge>
+        {online ? (
+          <Badge tone="success" className="hidden sm:inline-flex">
+            <Wifi className="h-3 w-3" />
+            Online
+          </Badge>
+        ) : (
+          <Badge tone="danger" className="inline-flex">
+            <WifiOff className="h-3 w-3" />
+            Offline
+          </Badge>
+        )}
         <button
           type="button"
           onClick={toggleTheme}

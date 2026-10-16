@@ -620,7 +620,6 @@ export interface DashboardData {
   topReceivables?: { id: string; name: string; balance: number }[];
   /** requires expenses:read */
   topPayables?: { id: string; name: string; balance: number }[];
-  moduleRoadmap: { name: string; status: string; priority: number }[];
 }
 
 export interface Expense {

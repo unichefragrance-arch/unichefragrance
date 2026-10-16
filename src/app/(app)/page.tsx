@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowRight, AlertTriangle, Sparkles, TrendingUp, TrendingDown } from "lucide-react";
+import { ArrowRight, AlertTriangle, TrendingUp, TrendingDown } from "lucide-react";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -29,7 +29,6 @@ export default function DashboardPage() {
     salesTrend = [],
     alerts = [],
     recentSales = [],
-    moduleRoadmap = [],
     expenseByCategory = [],
     topReceivables = [],
     topPayables = [],
@@ -414,7 +413,7 @@ export default function DashboardPage() {
         </Panel>
       )}
 
-      <div className={`mt-6 grid gap-6 ${canPos ? "lg:grid-cols-2" : ""}`}>
+      <div className="mt-6 grid gap-6">
         {canPos && (
           <Panel className="animate-fade-up" padding={false}>
             <div className="border-b border-line/70 px-5 py-4">
@@ -462,44 +461,6 @@ export default function DashboardPage() {
           </Panel>
         )}
 
-        <Panel className="animate-fade-up">
-          <PanelHeader
-            title="Phase 1 Roadmap"
-            subtitle="Build order for the prototype"
-            action={
-              <Badge tone="gold">
-                <Sparkles className="h-3 w-3" />
-                Playground
-              </Badge>
-            }
-          />
-          <ul className="space-y-2">
-            {moduleRoadmap.map((mod) => (
-              <li
-                key={mod.name}
-                className="flex items-center justify-between rounded-2xl border border-line/60 bg-mist/80 px-3 py-2"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-ink text-[11px] font-semibold text-canvas">
-                    {mod.priority}
-                  </span>
-                  <span className="text-sm font-medium">{mod.name}</span>
-                </div>
-                <Badge
-                  tone={
-                    mod.status === "prototype"
-                      ? "success"
-                      : mod.status === "shell"
-                        ? "warning"
-                        : "neutral"
-                  }
-                >
-                  {mod.status}
-                </Badge>
-              </li>
-            ))}
-          </ul>
-        </Panel>
       </div>
 
     </div>
