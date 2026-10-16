@@ -50,11 +50,12 @@ export async function ensureAuthBootstrap(): Promise<void> {
     const password =
       process.env.ADMIN_PASSWORD ||
       process.env.FORMULA_ADMIN_PASSWORD ||
-      process.env.IMPORT_ADMIN_PASSWORD ||
-      (process.env.NODE_ENV === "production" ? undefined : "admin");
+      process.env.IMPORT_ADMIN_PASSWORD;
+    // No built-in default in any environment: `next dev` may point at a shared
+    // database, and a known password there is as bad as in production.
     if (!password) {
       throw new Error(
-        "ADMIN_PASSWORD is not set. Refusing to bootstrap the first admin user with an insecure default in production.",
+        "ADMIN_PASSWORD is not set. Refusing to bootstrap the first admin user with a built-in default password.",
       );
     }
 

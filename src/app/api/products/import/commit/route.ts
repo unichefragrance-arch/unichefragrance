@@ -8,6 +8,7 @@ import {
   type ExistingProductRef,
 } from "@/lib/excel/validate";
 import { defaultLowStockAt } from "@/lib/inventory/stockCheck";
+import { importOverridePasswordValid } from "@/lib/excel/importOverride";
 import { ImportBatch, Product } from "@/lib/models";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
@@ -51,11 +52,6 @@ function mapExisting(p: {
   };
 }
 
-function checkAdminPassword(password: string | undefined): boolean {
-  const expected = process.env.IMPORT_ADMIN_PASSWORD || "admin";
-  return Boolean(password) && password === expected;
-}
-
 export async function POST(req: Request) {
   try {
     const access = requireApiAccess(req);
@@ -86,7 +82,7 @@ export async function POST(req: Request) {
       );
     }
 
-    if (adminOverride && !checkAdminPassword(adminPassword)) {
+    if (adminOverride && !importOverridePasswordValid(adminPassword)) {
       return NextResponse.json(
         { error: "Invalid admin password for price-floor override" },
         { status: 403 },

@@ -6,6 +6,7 @@ import { ROLE_LABELS } from "../src/lib/auth/roles";
 import type { UserRole } from "../src/lib/types";
 import mongoose from "mongoose";
 import { assertLocalOnlyTarget } from "./lib/dbSafety";
+import { requireOwnerCredentials, type OwnerCredentials } from "./lib/ownerCredentials";
 
 function env(name: string, fallback: string): string {
   const v = process.env[name]?.trim();
@@ -19,18 +20,11 @@ type DemoUser = {
   role: UserRole;
 };
 
-function demoUsersFromEnv(): DemoUser[] {
+function demoUsersFromEnv(owner: OwnerCredentials): DemoUser[] {
   return [
     {
-      name: env("ADMIN_NAME", "Owner"),
-      email: env(
-        "SUPER_ADMIN_EMAIL",
-        env("ADMIN_EMAIL", "abc@gmail.com"),
-      ).toLowerCase(),
-      password: env(
-        "SUPER_ADMIN_PASSWORD",
-        env("ADMIN_PASSWORD", "UnichAdmin@123"),
-      ),
+      // Owner: from the environment only — no committed default (see lib/ownerCredentials).
+      ...owner,
       role: "owner",
     },
     {
@@ -101,6 +95,8 @@ async function upsertUser(
 async function main() {
   // Destructive: local databases only — refuses Atlas/remote/unset targets, no override.
   assertLocalOnlyTarget("bootstrap-rbac");
+  // Before any write: refuse when the owner variables are missing.
+  const demoUsers = demoUsersFromEnv(requireOwnerCredentials("bootstrap-rbac"));
   await ensureAuthBootstrap();
   await connectDB();
 
@@ -113,7 +109,7 @@ async function main() {
     });
   }
 
-  for (const d of demoUsersFromEnv()) {
+  for (const d of demoUsers) {
     await upsertUser(branch._id, branch.name, d);
   }
 

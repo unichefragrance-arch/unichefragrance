@@ -28,6 +28,7 @@ import { hashPassword } from "../src/lib/auth/password";
 import { ROLE_LABELS } from "../src/lib/auth/roles";
 import { computeQuotationTotals } from "../src/lib/quotation/calc";
 import { assertLocalOnlyTarget } from "./lib/dbSafety";
+import { requireOwnerCredentials } from "./lib/ownerCredentials";
 
 async function clearAll() {
   await Promise.all([
@@ -49,6 +50,8 @@ async function clearAll() {
 async function seed() {
   // Destructive: local databases only — refuses Atlas/remote/unset targets, no override.
   assertLocalOnlyTarget("seed");
+  // Before any write: a missing owner variable must not leave a half-seeded DB.
+  const owner = requireOwnerCredentials("seed");
   console.log("Connecting to MongoDB Atlas...");
   await connectDB();
   console.log("Connected. Clearing collections...");
@@ -1339,15 +1342,8 @@ async function seed() {
 
   const rbacUsers = [
     {
-      name: env("ADMIN_NAME", "Owner"),
-      email: env(
-        "SUPER_ADMIN_EMAIL",
-        env("ADMIN_EMAIL", "abc@gmail.com"),
-      ).toLowerCase(),
-      password: env(
-        "SUPER_ADMIN_PASSWORD",
-        env("ADMIN_PASSWORD", "UnichAdmin@123"),
-      ),
+      // Owner: from the environment only — no committed default (see lib/ownerCredentials).
+      ...owner,
       role: "owner" as const,
     },
     {
