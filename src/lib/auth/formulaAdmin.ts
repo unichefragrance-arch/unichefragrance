@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { NextResponse } from "next/server";
-import { getSessionFromRequest } from "@/lib/auth/session";
+import { cookieFromRequest, getSessionFromRequest } from "@/lib/auth/session";
 
 /** BLD-04: formula confidentiality — Admin-only recipe access. */
 export const FORMULA_ADMIN_COOKIE = "unich_formula_admin";
@@ -123,21 +123,9 @@ export function parseFormulaAdminToken(
   }
 }
 
-function cookieFromRequest(req: Request): string | null {
-  const header = req.headers.get("cookie") || "";
-  const parts = header.split(";");
-  for (const part of parts) {
-    const [rawKey, ...rest] = part.trim().split("=");
-    if (rawKey === FORMULA_ADMIN_COOKIE) {
-      return decodeURIComponent(rest.join("="));
-    }
-  }
-  return null;
-}
-
 /** Resolve admin session from cookie or one-shot credential headers. */
 export function getFormulaAdmin(req: Request): FormulaAdminSession | null {
-  const fromCookie = parseFormulaAdminToken(cookieFromRequest(req));
+  const fromCookie = parseFormulaAdminToken(cookieFromRequest(req, FORMULA_ADMIN_COOKIE));
   if (fromCookie) return fromCookie;
 
   // Owner is already the app's top-level admin — don't re-prompt for the

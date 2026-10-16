@@ -1,4 +1,5 @@
 import type { StockBucket } from "@/lib/types";
+import { csvCell } from "@/lib/csvCell";
 
 export type ValuationBucket = StockBucket | "all";
 
@@ -225,7 +226,7 @@ export function buildInventoryValuationCsv(
           csvEscape(p.sku),
           csvEscape(p.name),
           csvEscape(p.brand || ""),
-          p.unit,
+          csvEscape(p.unit),
           Number(p.qty.toFixed(3)),
           Number(p.costFifo.toFixed(3)),
           Number(p.value.toFixed(3)),
@@ -237,9 +238,9 @@ export function buildInventoryValuationCsv(
   return lines.join("\n");
 }
 
+/** Quoting + formula-injection guard shared with the report engine (see lib/csvCell). */
 function csvEscape(value: string): string {
-  if (/[",\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
-  return value;
+  return csvCell(value);
 }
 
 export function parseValuationBucket(value: string | null): ValuationBucket {

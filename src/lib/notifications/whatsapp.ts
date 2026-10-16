@@ -50,7 +50,8 @@ export function formatQuotationMessage(input: {
     ``,
     `Please reply to confirm or request changes.`,
   ]
-    .filter(Boolean)
+    // Drop only absent optional fields (null) — "" lines are intentional spacers.
+    .filter((line) => line !== null)
     .join("\n");
 }
 

@@ -20,7 +20,9 @@
     "db:migrate-currency-omr": "tsx --env-file=.env scripts/migrate-currency-omr.ts",
     "db:migrate-sale-branch-ids": "tsx --env-file=.env scripts/migrate-sale-branch-ids.ts",
     "receipt:preview": "tsx scripts/receipt-preview.ts",
-    "db:wipe": "tsx --env-file=.env scripts/wipe-database.ts"
+    "db:wipe": "tsx --env-file=.env scripts/wipe-database.ts",
+    "test:unit": "node --import tsx --test \"tests/unit/**/*.test.ts\"",
+    "test:unit:coverage": "node --import tsx --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"tests/unit/**/*.test.ts\""
   },
   "dependencies": {
     "clsx": "^2.1.1",

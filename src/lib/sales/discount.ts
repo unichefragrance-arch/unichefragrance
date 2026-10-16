@@ -27,8 +27,10 @@ export const DISCOUNT_LIMIT_PCT: Record<UserRole, number> = {
   inventory: 0,
 };
 
+/** Own keys only — "toString" / "__proto__" must not resolve to Object.prototype members. Unknown roles get 0%. */
 export function discountLimitFor(role: UserRole | string | null | undefined): number {
-  return DISCOUNT_LIMIT_PCT[role as UserRole] ?? 0;
+  if (typeof role !== "string" || !Object.hasOwn(DISCOUNT_LIMIT_PCT, role)) return 0;
+  return DISCOUNT_LIMIT_PCT[role as UserRole];
 }
 
 /** OMR has 3 decimals (baisa). */

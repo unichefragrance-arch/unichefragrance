@@ -19,6 +19,12 @@
  * Afterwards the first login re-creates the MAIN branch and the ADMIN_EMAIL owner
  * (src/lib/auth/bootstrap.ts) from the deployed app's environment.
  * Credentials are never printed.
+ *
+ * The recovery was carried out on 2026-10-05. Since then --apply is LOCAL-ONLY
+ * (fails closed, no override): it refuses any target that is not an explicit
+ * mongodb://localhost|127.0.0.1|[::1] URL — Atlas/SRV/remote/unset all exit 2
+ * before connecting. A dry run stays read-only. To rehearse, pass a local URL
+ * inline: DATABASE_URL='mongodb://127.0.0.1:27099/unich_rehearsal?...'.
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -41,6 +47,14 @@ const DELETE_ORDER = ["sales", "quotations", "fifolayers", "purchaseorders", "fo
 const DEMO_EMAILS = ["owner@unich.local", "admin@unich.local", "sales@unich.local", "accounts@unich.local", "inventory@unich.local", "branchmanager@unich.local"];
 const NATURAL = ["sku", "email", "phone", "number", "code"];
 
+/** Same rule as src/lib/e2eGuard.ts isLocalDbUrl: plain mongodb:// and every host is loopback. */
+function isLocalDbUrl(url) {
+  const raw = String(url || "").trim();
+  if (!/^mongodb:\/\//.test(raw)) return false;
+  const host = raw.replace(/^mongodb:\/\//, "").split(/[/?]/)[0].split("@").pop() || "";
+  return host !== "" && host.split(",").every((h) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(h));
+}
+
 function target(url) {
   const after = String(url || "").replace(/^mongodb(\+srv)?:\/\//, "");
   const host = after.split(/[/?]/)[0].split("@").pop() || "";
@@ -58,7 +72,14 @@ function isSeedDoc(name, d) {
 (async () => {
   const t = target(process.env.DATABASE_URL);
   console.log(`Target: ${t.hostSuffix}/${t.dbName} — ${APPLY ? "APPLY" : "DRY RUN (read only)"}`);
-  if (APPLY && CONFIRM !== t.dbName) throw new Error(`--apply needs --confirm-db=${t.dbName}`);
+  if (APPLY && !isLocalDbUrl(process.env.DATABASE_URL)) {
+    console.error("REFUSING TO RUN: --apply deletes documents and only runs against a local disposable database (mongodb://localhost|127.0.0.1|[::1]). No override exists.");
+    process.exit(2);
+  }
+  if (APPLY && (!CONFIRM || CONFIRM !== t.dbName)) {
+    console.error(`REFUSING TO RUN: --apply needs --confirm-db=<database name> matching the target ("${t.dbName}").`);
+    process.exit(2);
+  }
 
   const client = new MongoClient(process.env.DATABASE_URL, { appName: "recovery-2026-10-05" });
   await client.connect();

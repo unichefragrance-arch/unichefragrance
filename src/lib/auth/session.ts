@@ -109,7 +109,12 @@ export function cookieFromRequest(
   for (const part of parts) {
     const [rawKey, ...rest] = part.trim().split("=");
     if (rawKey === cookieName) {
-      return decodeURIComponent(rest.join("="));
+      // A malformed value ("%E0") is not a session — never a 500.
+      try {
+        return decodeURIComponent(rest.join("="));
+      } catch {
+        return null;
+      }
     }
   }
   return null;

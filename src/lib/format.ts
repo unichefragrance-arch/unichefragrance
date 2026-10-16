@@ -13,6 +13,17 @@ function withBreakableSpace(formatted: string): string {
   return formatted.replace(/\u00A0/g, " ");
 }
 
+/**
+ * Display policy for amounts that are not real numbers (NaN, ±Infinity,
+ * undefined/null or a non-numeric string from loose data): show 0 — the same
+ * rule as roundMoney / moneyText in lib/money and money() on receipts — so a
+ * screen never shows "OMRNaN" or "OMR ∞". Numeric strings ("12.5") still format.
+ */
+function displayAmount(amount: unknown): number {
+  const n = typeof amount === "number" ? amount : Number(amount);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export function formatMoney(amount: number, currency = "OMR"): string {
   return withBreakableSpace(
     new Intl.NumberFormat("en-OM", {
@@ -20,7 +31,7 @@ export function formatMoney(amount: number, currency = "OMR"): string {
       currency,
       minimumFractionDigits: 2,
       maximumFractionDigits: 3,
-    }).format(amount),
+    }).format(displayAmount(amount)),
   );
 }
 
@@ -32,7 +43,7 @@ export function formatMoneyCompact(amount: number, currency = "OMR"): string {
       currency,
       notation: "compact",
       maximumFractionDigits: 1,
-    }).format(amount),
+    }).format(displayAmount(amount)),
   );
 }
 

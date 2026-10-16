@@ -1,19 +1,24 @@
+/** Id as a string; a missing id (null/undefined) is "" — never the text "undefined". */
+function idString(value: unknown): string {
+  return value == null ? "" : String(value);
+}
+
 export function mapProductionOrder(p: Record<string, unknown>) {
   const plannedLines = Array.isArray(p.plannedLines)
     ? (p.plannedLines as Record<string, unknown>[]).map((l) => ({
         ...l,
-        productId: String(l.productId),
+        productId: idString(l.productId),
       }))
     : [];
 
   const consumption = Array.isArray(p.consumption)
     ? (p.consumption as Record<string, unknown>[]).map((c) => ({
         ...c,
-        productId: String(c.productId),
+        productId: idString(c.productId),
         batches: Array.isArray(c.batches)
           ? (c.batches as Record<string, unknown>[]).map((b) => ({
               ...b,
-              layerId: String(b.layerId),
+              layerId: idString(b.layerId),
               purchaseDate: b.purchaseDate
                 ? new Date(b.purchaseDate as string).toISOString().slice(0, 10)
                 : undefined,
@@ -26,7 +31,7 @@ export function mapProductionOrder(p: Record<string, unknown>) {
   const mappedBatch = batch
     ? {
         ...batch,
-        outputProductId: String(batch.outputProductId),
+        outputProductId: idString(batch.outputProductId),
         fifoLayerId: batch.fifoLayerId ? String(batch.fifoLayerId) : undefined,
         producedAt: batch.producedAt
           ? new Date(batch.producedAt as string).toISOString().replace("T", " ").slice(0, 16)
@@ -36,9 +41,9 @@ export function mapProductionOrder(p: Record<string, unknown>) {
 
   return {
     ...p,
-    formulaId: String(p.formulaId),
+    formulaId: idString(p.formulaId),
     oilProductId: p.oilProductId ? String(p.oilProductId) : undefined,
-    outputProductId: String(p.outputProductId),
+    outputProductId: idString(p.outputProductId),
     plannedLines,
     consumption,
     batch: mappedBatch,
