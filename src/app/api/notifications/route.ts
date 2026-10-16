@@ -17,29 +17,38 @@ export const runtime = "nodejs";
  */
 async function syncNotifications(session: AppSession) {
   const alerts = await buildAlerts(session);
-  const activeKeys = alerts.map((a) => a.id);
+  // What a user is shown depends on their role and branch, so each user
+  // has their own documents — one user's sync or "mark all read" must never
+  // touch (or reveal) another's.
+  const keyOf = (alertId: string) => `${session.userId}:${alertId}`;
+  const activeKeys = alerts.map((a) => keyOf(a.id));
 
-  await Promise.all(
-    alerts.map((a) =>
-      Notification.updateOne(
-        { dedupeKey: a.id },
-        {
-          $set: {
-            type: a.type,
-            title: a.title,
-            detail: a.detail,
-            severity: a.severity,
-            resolved: false,
+  // One round trip for every alert (a large catalogue can have hundreds of
+  // low-stock alerts), not one updateOne each.
+  if (alerts.length > 0) {
+    await Notification.bulkWrite(
+      alerts.map((a) => ({
+        updateOne: {
+          filter: { dedupeKey: keyOf(a.id) },
+          update: {
+            $set: {
+              type: a.type,
+              title: a.title,
+              detail: a.detail,
+              severity: a.severity,
+              resolved: false,
+            },
+            $setOnInsert: { dedupeKey: keyOf(a.id), userId: session.userId, read: false },
           },
-          $setOnInsert: { dedupeKey: a.id, read: false },
+          upsert: true,
         },
-        { upsert: true },
-      ),
-    ),
-  );
+      })),
+      { ordered: false },
+    );
+  }
 
   await Notification.updateMany(
-    { dedupeKey: { $nin: activeKeys }, resolved: false },
+    { userId: session.userId, dedupeKey: { $nin: activeKeys }, resolved: false },
     { $set: { resolved: true } },
   );
 }
@@ -53,10 +62,11 @@ export async function GET(req: Request) {
     await connectDB();
     await syncNotifications(session);
 
-    const items = await Notification.find({ resolved: false })
+    const items = await Notification.find({ userId: session.userId, resolved: false })
       .sort({ read: 1, createdAt: -1 })
       .limit(50);
     const unreadCount = await Notification.countDocuments({
+      userId: session.userId,
       resolved: false,
       read: false,
     });
@@ -75,11 +85,16 @@ export async function PATCH(req: Request) {
     const access = requireApiAccess(req);
     if (access !== null && isAuthResponse(access)) return access;
 
+    const session = access as AppSession;
+
     await connectDB();
     const body = (await req.json().catch(() => null)) ?? {};
 
     if (body.all) {
-      await Notification.updateMany({ read: false }, { $set: { read: true } });
+      await Notification.updateMany(
+        { userId: session.userId, read: false },
+        { $set: { read: true } },
+      );
       return NextResponse.json({ ok: true });
     }
 
@@ -90,7 +105,7 @@ export async function PATCH(req: Request) {
     if (!mongoose.isValidObjectId(id)) {
       return NextResponse.json({ error: "Invalid notification id" }, { status: 400 });
     }
-    await Notification.updateOne({ _id: id }, { $set: { read: true } });
+    await Notification.updateOne({ _id: id, userId: session.userId }, { $set: { read: true } });
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(

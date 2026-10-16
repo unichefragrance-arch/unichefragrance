@@ -11,6 +11,9 @@ import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/a
 
 export const runtime = "nodejs";
 
+/** Largest upload the proxy passes through whole (Next.js default: 10 MB). */
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
 function mapExisting(p: {
   _id: { toString(): string };
   sku: string;
@@ -53,6 +56,17 @@ export async function POST(req: Request) {
   try {
     const access = requireApiAccess(req);
     if (access !== null && isAuthResponse(access)) return access;
+
+    // The proxy buffers at most 10 MB of a request body (Next.js
+    // proxyClientMaxBodySize default) and cuts the rest — a larger upload
+    // arrives truncated and used to fail as "file is required".
+    const declared = Number(req.headers.get("content-length") || 0);
+    if (declared > MAX_UPLOAD_BYTES) {
+      return NextResponse.json(
+        { error: `File is too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB). Split it into smaller files.` },
+        { status: 413 },
+      );
+    }
 
     await connectDB();
     // Not multipart (e.g. a JSON body) → formData() throws; that's a bad request.

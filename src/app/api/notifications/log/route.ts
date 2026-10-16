@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import { DeliveryLog, Sale } from "@/lib/models";
@@ -6,6 +7,8 @@ import { receiptNumberFor } from "@/lib/receipt/document";
 import { toJSONList } from "@/lib/serialize";
 import type { DeliveryChannel, DeliveryStatus } from "@/lib/types";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { assertBranchAccess } from "@/lib/auth/guards";
+import { canAccessAllBranches } from "@/lib/auth/roles";
 
 const CHANNELS: DeliveryChannel[] = ["print", "email", "whatsapp", "sms"];
 const STATUSES: DeliveryStatus[] = ["sent", "failed", "handoff", "printed"];
@@ -20,6 +23,20 @@ export async function GET(req: Request) {
     const saleId = searchParams.get("saleId");
     const channel = searchParams.get("channel");
     const limit = Math.min(Number(searchParams.get("limit") || 50), 200);
+
+    // Delivery entries hold customer phones / emails: outside Owner, only a
+    // sale's own branch may read them, one sale at a time.
+    if (access && !canAccessAllBranches(access.role)) {
+      if (!saleId || !mongoose.isValidObjectId(saleId)) {
+        return NextResponse.json({ error: "saleId is required" }, { status: 400 });
+      }
+      const sale = await Sale.findById(saleId).select("branchId").lean<{ branchId?: unknown }>();
+      if (!sale) {
+        return NextResponse.json({ error: "Sale not found" }, { status: 404 });
+      }
+      const denied = assertBranchAccess(access, sale.branchId ? String(sale.branchId) : null);
+      if (denied) return denied;
+    }
 
     const filter: Record<string, unknown> = {};
     if (saleId) filter.saleId = saleId;

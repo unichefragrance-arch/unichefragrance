@@ -5,6 +5,7 @@ import {
   requireFormulaAdmin,
 } from "@/lib/auth/formulaAdmin";
 import { connectDB } from "@/lib/db";
+import { CLAIM_STALE_MS } from "@/lib/production/completeProduction";
 import { mapProductionOrder } from "@/lib/production/mapProduction";
 import { SaleError } from "@/lib/sales/errors";
 import { ProductionOrder } from "@/lib/models";
@@ -80,12 +81,31 @@ export async function DELETE(req: Request, ctx: Ctx) {
       );
     }
 
-    order.status = "cancelled";
-    order.cancelledAt = new Date();
-    await order.save();
+    // Atomic: only a draft that no request is completing right now can be
+    // cancelled. A plain save() here used to overwrite a completion that
+    // committed after the read above — a "cancelled" order whose materials
+    // were consumed and whose output was added.
+    const cancelled = await ProductionOrder.findOneAndUpdate(
+      {
+        _id: order._id,
+        status: "draft",
+        $or: [
+          { completingAt: null },
+          { completingAt: { $lt: new Date(Date.now() - CLAIM_STALE_MS) } },
+        ],
+      },
+      { $set: { status: "cancelled", cancelledAt: new Date() } },
+      { returnDocument: "after" },
+    );
+    if (!cancelled) {
+      return NextResponse.json(
+        { error: "This production order is being completed or was just completed — it can't be cancelled" },
+        { status: 409 },
+      );
+    }
 
     return NextResponse.json(
-      mapProductionOrder(toJSON(order)! as Record<string, unknown>),
+      mapProductionOrder(toJSON(cancelled)! as Record<string, unknown>),
     );
   } catch (error) {
     if (error instanceof SaleError) {

@@ -4,6 +4,7 @@ import { Expense } from "@/lib/models";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { recordAudit } from "@/lib/audit/log";
+import { branchScopeFilter } from "@/lib/auth/guards";
 
 export function mapExpense(e: Record<string, unknown>) {
   return {
@@ -18,19 +19,9 @@ export async function GET(req: Request) {
     if (access !== null && isAuthResponse(access)) return access;
 
     await connectDB();
-    const filter: Record<string, unknown> = {};
-    if (
-      access &&
-      "role" in access &&
-      access.role !== "owner" &&
-      access.branchId
-    ) {
-      filter.$or = [
-        { branchId: access.branchId },
-        { branchId: null },
-        { branchId: { $exists: false } },
-      ];
-    }
+    // Same isolation as sales / purchases: a non-owner with no branch sees
+    // only unbranched (legacy) expenses, never every branch.
+    const filter = (access && branchScopeFilter(access)) || {};
     const expenses = await Expense.find(filter).sort({ date: -1 });
     return NextResponse.json(toJSONList(expenses).map(mapExpense));
   } catch (error) {
@@ -48,8 +39,11 @@ export async function POST(req: Request) {
 
     await connectDB();
     const body = await req.json();
+    // Ids and timestamps are set by the server, never by the request.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { _id, id, __v, createdAt, updatedAt, ...fields } = body ?? {};
     const expense = await Expense.create({
-      ...body,
+      ...fields,
       date: new Date(body.date || Date.now()),
       status: body.status || "pending",
       branchId: access?.branchId ?? undefined,

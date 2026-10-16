@@ -306,11 +306,18 @@ export async function completeProductionOrder(
       order.completedAt = producedAt;
       order.completedBy = opts.completedBy;
       order.completingAt = null;
+      // Only a still-draft order completes: if a cancel (of a stale claim)
+      // committed meanwhile, the save matches nothing and the whole
+      // transaction — materials and output included — rolls back.
+      order.$where = { status: "draft" };
       await order.save({ session });
     });
 
     return order;
   } catch (err) {
+    if ((err as Error)?.name === "DocumentNotFoundError") {
+      err = new SaleError("VALIDATION", "Production order was cancelled or completed by another request");
+    }
     await ProductionOrder.updateOne(
       { _id: order._id, status: "draft" },
       { $set: { completingAt: null } },
@@ -319,4 +326,5 @@ export async function completeProductionOrder(
   }
 }
 
-const CLAIM_STALE_MS = 2 * 60 * 1000;
+/** A completion claim older than this belongs to a crashed request. */
+export const CLAIM_STALE_MS = 2 * 60 * 1000;

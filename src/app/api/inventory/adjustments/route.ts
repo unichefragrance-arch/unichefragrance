@@ -15,7 +15,7 @@ import {
 import { createSale } from "@/lib/sales/createSale";
 import { SaleError } from "@/lib/sales/errors";
 import { toJSON } from "@/lib/serialize";
-import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { isAuthResponse, isDbUnavailable, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { recordAudit } from "@/lib/audit/log";
 import {
   ADJUSTMENT_SUPPLIER,
@@ -71,7 +71,13 @@ async function claimAdjustment(input: {
   reason: AdjustmentReason;
   createdBy?: string;
   branchStamp: Record<string, unknown>;
-}): Promise<{ id: mongoose.Types.ObjectId } | { response: NextResponse }> {
+  /**
+   * The movement is itself idempotent under the same key (customer wastage:
+   * the replacement sale is deduplicated by createSale), so a duplicate that
+   * finds the claim still pending may finish it instead of answering IN_PROGRESS.
+   */
+  resumePending?: boolean;
+}): Promise<{ id: mongoose.Types.ObjectId; created: boolean } | { response: NextResponse }> {
   try {
     const claim = await InventoryAdjustment.create({
       productId: input.product._id,
@@ -85,7 +91,7 @@ async function claimAdjustment(input: {
       pending: true,
       ...input.branchStamp,
     });
-    return { id: claim._id };
+    return { id: claim._id, created: true };
   } catch (err) {
     if (!isDuplicateKey(err)) throw err;
   }
@@ -101,6 +107,7 @@ async function claimAdjustment(input: {
     pending?: boolean;
     costTotal?: number;
     expenseId?: mongoose.Types.ObjectId;
+    saleId?: mongoose.Types.ObjectId;
   }>();
   if (!existing) {
     // The first attempt failed and released the key in between — let the client retry.
@@ -117,6 +124,9 @@ async function claimAdjustment(input: {
         { status: 409 },
       ),
     };
+  }
+  if (existing.pending && input.resumePending) {
+    return { id: existing._id, created: false };
   }
   if (existing.pending) {
     return {
@@ -138,6 +148,7 @@ async function claimAdjustment(input: {
       qty: existing.qty,
       costTotal: existing.costTotal,
       expenseId: existing.expenseId ? String(existing.expenseId) : undefined,
+      saleId: existing.saleId ? String(existing.saleId) : undefined,
       adjustmentId: String(existing._id),
       stockSellable,
       warnings: [] as string[],
@@ -266,8 +277,24 @@ export async function POST(req: Request) {
         );
       }
 
+      // Keyed: claim the adjustment record first (unique per user + key).
+      // The sale and its record used to be written independently, so every
+      // retry or double submit of one replacement added another
+      // wastage_customer record for the same sale.
+      let claim: { id: mongoose.Types.ObjectId; created: boolean } | undefined;
+      if (idemKey) {
+        const claimed = await claimAdjustment({
+          key: idemKey, owner: access?.userId ?? "system", product, qty, direction: "out",
+          reason: "wastage_customer", createdBy, branchStamp, resumePending: true,
+        });
+        if ("response" in claimed) return claimed.response;
+        claim = claimed;
+      }
+
       const payment = String(body.payment || "cash").toLowerCase();
-      const { sale } = await createSale({
+      let sale: Awaited<ReturnType<typeof createSale>>["sale"];
+      try {
+        ({ sale } = await createSale({
         customerId: String(customer._id),
         customerPhone: customer.phone,
         customerName: customer.name,
@@ -284,20 +311,23 @@ export async function POST(req: Request) {
           },
         ],
         status: "completed",
-        idempotencyKey: body.idempotencyKey
-          ? String(body.idempotencyKey)
-          : undefined,
+        // Same key → createSale returns the same sale on a retry.
+        idempotencyKey: idemKey ?? undefined,
         // Keys are scoped per user + branch (no cross-user replay).
         idempotencyOwner: access?.userId,
         branchId: access?.branchId ?? undefined,
         branchName: access?.branchName ?? undefined,
-      });
+        }));
+      } catch (err) {
+        if (claim?.created) await InventoryAdjustment.deleteOne({ _id: claim.id }).catch(() => undefined);
+        throw err;
+      }
 
       const saleId = String(
         (sale as { id?: string; _id?: unknown }).id ||
           (sale as { _id?: unknown })._id,
       );
-      const adjustment = await InventoryAdjustment.create({
+      const wastageFields = {
         productId: product._id,
         productName: product.name,
         qty,
@@ -311,8 +341,14 @@ export async function POST(req: Request) {
         saleId: new mongoose.Types.ObjectId(saleId),
         notes: notes || "Customer leaked/damaged — replaced and paid by customer",
         createdBy,
-        ...branchStamp,
-      });
+      };
+      let adjustment: { _id: unknown };
+      if (claim) {
+        await InventoryAdjustment.updateOne({ _id: claim.id }, { $set: wastageFields, $unset: { pending: 1 } });
+        adjustment = { _id: claim.id };
+      } else {
+        adjustment = await InventoryAdjustment.create({ ...wastageFields, ...branchStamp });
+      }
 
       const updated = await Product.findById(productId);
       recordAudit({
@@ -558,7 +594,9 @@ export async function POST(req: Request) {
         error:
           safeErrorMessage(error, "Failed to adjust inventory"),
       },
-      { status: 400 },
+      // An unreachable database is not a bad request: 503 tells the client
+      // the outcome is unknown and the same idempotency key may be retried.
+      { status: isDbUnavailable(error) ? 503 : 400 },
     );
   }
 }

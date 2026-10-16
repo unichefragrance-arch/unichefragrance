@@ -13,6 +13,8 @@ export type SaleErrorCode =
   | "HELD_BILL_UNAVAILABLE"
   /** Same idempotency key, different bill — the earlier sale stands (409). */
   | "IDEMPOTENCY_CONFLICT"
+  /** The till disconnected before anything was written (503: retry with the same key). */
+  | "CHECKOUT_ABANDONED"
   | "VALIDATION";
 
 export class SaleError extends Error {

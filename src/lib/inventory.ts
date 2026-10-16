@@ -456,9 +456,14 @@ export async function addFifoLayer(input: {
     [{ $set: { stockSellable: addRounded("$stockSellable", qty) } }],
     { session },
   );
-  if (res.matchedCount > 0) {
-    await refreshCostFifo(input.productId, { session: session ?? null });
+  if (res.matchedCount === 0) {
+    // Product deleted meanwhile (e.g. an import undo committed between a PO's
+    // creation and its receipt): never leave a layer no product counts.
+    // In a transaction the abort removes the layer; otherwise delete it here.
+    if (!session) await FifoLayer.findByIdAndDelete(layer._id);
+    throw new SaleError("PRODUCT_NOT_FOUND", "Product not found — it may have been deleted");
   }
+  await refreshCostFifo(input.productId, { session: session ?? null });
 
   return layer;
 }

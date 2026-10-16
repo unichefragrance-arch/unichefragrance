@@ -11,9 +11,7 @@ import { Product } from "@/lib/models";
 import { escapeRegex } from "@/lib/phone";
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
-import { canViewCostPrices, redactCostFields } from "@/lib/auth/roles";
-
-const COST_FIELDS = ["wholesalePrice", "costFifo", "minMarginPct"];
+import { canViewCostPrices, PRODUCT_COST_FIELDS as COST_FIELDS, redactCostFields } from "@/lib/auth/roles";
 /** Set by the server only — never accepted from a create request. */
 const SERVER_OWNED_FIELDS = ["_id", "id", "__v", "createdAt", "updatedAt", "importBatchId"];
 

@@ -14,6 +14,9 @@ import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/a
 
 export const runtime = "nodejs";
 
+/** Large imports write row by row; a claim older than this is a crashed request. */
+const COMMIT_CLAIM_STALE_MS = 10 * 60 * 1000;
+
 function mapExisting(p: {
   _id: { toString(): string };
   sku: string;
@@ -181,6 +184,30 @@ export async function POST(req: Request) {
       }
     }
 
+    // Claim the batch before writing: two commits of one batch (double click,
+    // two tabs) used to interleave — duplicate-SKU and version errors failed
+    // both and left the batch staged. A claim older than COMMIT_CLAIM_STALE_MS
+    // belongs to a crashed request and may be taken over.
+    const claimed = await ImportBatch.updateOne(
+      {
+        _id: batch._id,
+        status: "staged",
+        $or: [
+          { committingAt: null },
+          { committingAt: { $lt: new Date(Date.now() - COMMIT_CLAIM_STALE_MS) } },
+        ],
+      },
+      { $set: { committingAt: new Date() } },
+    );
+    if (claimed.modifiedCount === 0) {
+      return NextResponse.json(
+        { error: "This import is already being committed — refresh in a moment." },
+        { status: 409 },
+      );
+    }
+    const releaseClaim = () =>
+      ImportBatch.updateOne({ _id: batch._id }, { $set: { committingAt: null } }).catch(() => undefined);
+
     let createdCount = 0;
     let updatedCount = 0;
 
@@ -283,6 +310,7 @@ export async function POST(req: Request) {
     } catch (error) {
       batch.markModified("rows");
       await batch.save().catch(() => {});
+      await releaseClaim();
       throw error;
     }
 
@@ -291,7 +319,11 @@ export async function POST(req: Request) {
     batch.created = createdCount;
     batch.updated = updatedCount;
     batch.failed = rows.filter((r: { action: string }) => r.action === "error").length;
-    await batch.save();
+    try {
+      await batch.save();
+    } finally {
+      await releaseClaim();
+    }
 
     return NextResponse.json({
       batchId: batch.batchId,

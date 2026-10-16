@@ -1,3 +1,4 @@
+import { Types } from "mongoose";
 import { NextResponse } from "next/server";
 import type { UserRole } from "@/lib/types";
 import {
@@ -99,6 +100,19 @@ export function branchScopeFilter(
       { branchId: { $exists: false } },
     ],
   };
+}
+
+/**
+ * Exact-branch match for aggregates (dashboard, alerts): Owner → every
+ * branch; a branch user → only that branch; a non-owner with no (or an
+ * unreadable) branch → only unbranched records — never every branch.
+ */
+export function ownBranchMatch(session: AppSession): Record<string, unknown> {
+  if (canAccessAllBranches(session.role)) return {};
+  if (!session.branchId || !Types.ObjectId.isValid(session.branchId)) {
+    return { branchId: null };
+  }
+  return { branchId: new Types.ObjectId(session.branchId) };
 }
 
 export function sessionBranchId(session: AppSession): string | null {

@@ -5,6 +5,7 @@ import { toJSON } from "@/lib/serialize";
 import mongoose from "mongoose";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { assertBranchAccess } from "@/lib/auth/guards";
+import { redactSaleCost } from "@/lib/auth/roles";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -45,7 +46,8 @@ export async function GET(req: Request, context: RouteContext) {
       const denied = assertBranchAccess(access, sale.branchId ? String(sale.branchId) : null);
       if (denied) return denied;
     }
-    return NextResponse.json(mapSale(toJSON(sale)!));
+    const json = toJSON(sale)!;
+    return NextResponse.json(mapSale(access ? redactSaleCost(json, access.role) : json));
   } catch (error) {
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to load sale") },
@@ -100,7 +102,8 @@ export async function PATCH(req: Request, context: RouteContext) {
           { status: sale.status === "held" ? 409 : 400 },
         );
       }
-      return NextResponse.json(mapSale(toJSON(voided)!));
+      const json = toJSON(voided)!;
+      return NextResponse.json(mapSale(access ? redactSaleCost(json, access.role) : json));
     }
 
     return NextResponse.json(

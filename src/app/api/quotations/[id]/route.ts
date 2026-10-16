@@ -45,6 +45,22 @@ function isConverted(q: { status?: string; convertedToSaleId?: unknown }): boole
   return q.status === "converted" || Boolean(q.convertedToSaleId);
 }
 
+/**
+ * A later save() applies only while the quotation is still in the state this
+ * request loaded. Without it, an edit / revise / share that read the quotation
+ * before a convert committed overwrote it afterwards — a converted quotation
+ * (with its sale) flipped back to "rejected" or "revised".
+ */
+function saveOnlyIfUnchanged(q: { status?: string; convertedToSaleId?: unknown; $where?: unknown }) {
+  q.$where = { status: q.status, convertedToSaleId: q.convertedToSaleId ?? null };
+}
+
+const staleSave = (error: unknown) => (error as Error)?.name === "DocumentNotFoundError";
+const STALE_SAVE_RESPONSE = {
+  error: "This quotation was just changed by another request (e.g. converted). Reload it and try again.",
+  code: "CONFLICT",
+};
+
 const EDITABLE_ANY_STATUS = new Set([
   "customerPoNumber",
   "attachments",
@@ -102,6 +118,7 @@ export async function PUT(req: Request, ctx: Ctx) {
       const denied = assertBranchAccess(access, quotation.branchId ? String(quotation.branchId) : null);
       if (denied) return denied;
     }
+    saveOnlyIfUnchanged(quotation);
 
     // A converted quotation is the record behind a completed sale: only
     // reference metadata (PO number, attachments, notes, contact details) may
@@ -190,6 +207,7 @@ export async function PUT(req: Request, ctx: Ctx) {
     await quotation.save(FAST_WC);
     return NextResponse.json(mapQuote(toJSON(quotation)!));
   } catch (error) {
+    if (staleSave(error)) return NextResponse.json(STALE_SAVE_RESPONSE, { status: 409 });
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to update quotation") },
       { status: 400 },
@@ -252,6 +270,7 @@ export async function POST(req: Request, ctx: Ctx) {
       const denied = assertBranchAccess(access, quotation.branchId ? String(quotation.branchId) : null);
       if (denied) return denied;
     }
+    saveOnlyIfUnchanged(quotation);
 
     if (action === "revise") {
       if (isConverted(quotation)) {
@@ -692,6 +711,7 @@ export async function POST(req: Request, ctx: Ctx) {
 
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   } catch (error) {
+    if (staleSave(error)) return NextResponse.json(STALE_SAVE_RESPONSE, { status: 409 });
     // Below-minimum price without (valid) Admin approval → 403, like checkout.
     const denied =
       error instanceof SaleError &&

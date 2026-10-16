@@ -36,8 +36,11 @@ export async function POST(req: Request) {
 
     await connectDB();
     const body = await req.json();
+    // Ids and timestamps are set by the server, never by the request.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { _id, id, __v, createdAt, updatedAt, ...fields } = body ?? {};
     const supplier = await Supplier.create({
-      ...body,
+      ...fields,
       lastPurchase: body.lastPurchase ? new Date(body.lastPurchase) : undefined,
     });
     return NextResponse.json(mapSupplier(toJSON(supplier)!), { status: 201 });

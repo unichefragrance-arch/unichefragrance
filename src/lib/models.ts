@@ -704,6 +704,8 @@ const ImportBatchSchema = new Schema(
     priceFloorCount: { type: Number, default: 0 },
     rawRows: { type: Schema.Types.Mixed, default: [] },
     rows: [ImportBatchRowSchema],
+    /** Set while one request commits the batch — a second commit of it is refused. */
+    committingAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
@@ -1017,7 +1019,10 @@ export const AuditLog = models.AuditLog || model("AuditLog", AuditLogSchema);
  */
 const NotificationSchema = new Schema(
   {
+    /** `<userId>:<alert id>` — alerts depend on the viewer's role and branch. */
     dedupeKey: { type: String, required: true, unique: true },
+    /** Whose bell this is: read / resolved state is per user, never shared. */
+    userId: { type: String, index: true },
     type: { type: String, required: true },
     title: { type: String, required: true },
     detail: { type: String, default: "" },

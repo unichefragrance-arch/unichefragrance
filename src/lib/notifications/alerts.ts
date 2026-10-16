@@ -1,9 +1,8 @@
 import { moneyText } from "@/lib/money";
-import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Customer, Product, Sale, Supplier } from "@/lib/models";
 import { hasPermission } from "@/lib/auth/roles";
-import { resolveBranchScope } from "@/lib/reporting-engine/access";
+import { ownBranchMatch } from "@/lib/auth/guards";
 import type { AppSession } from "@/lib/auth/session";
 
 export type AlertSeverity = "info" | "warning" | "critical";
@@ -31,16 +30,16 @@ export async function buildAlerts(session: AppSession): Promise<AlertItem[]> {
 
   await connectDB();
 
-  const branchScope = resolveBranchScope(session, null);
-  const branchFilter =
-    branchScope && Types.ObjectId.isValid(branchScope)
-      ? { branchId: new Types.ObjectId(branchScope) }
-      : {};
+  const branchFilter = ownBranchMatch(session);
 
   const alerts: AlertItem[] = [];
 
   if (canInventory) {
-    const products = await Product.find();
+    // Lean + only the fields the alerts read: this runs on every bell poll
+    // for every inventory user, over the whole catalogue.
+    const products = await Product.find()
+      .select("name unit stockSellable lowStockAt lastSoldAt")
+      .lean<{ _id: unknown; name: string; unit: string; stockSellable: number; lowStockAt: number; lastSoldAt?: Date }[]>();
     const lowStock = products.filter(
       (p) => p.lowStockAt > 0 && p.stockSellable <= p.lowStockAt,
     );
@@ -84,7 +83,7 @@ export async function buildAlerts(session: AppSession): Promise<AlertItem[]> {
       status: "completed",
       createdAt: { $gte: weekAgo },
       ...branchFilter,
-    }).select("total");
+    }).select("total").lean<{ total: number }[]>();
     const weekTotal = weekSales.reduce((s, x) => s + x.total, 0);
     alerts.push({
       id: "weekly-report",
@@ -96,7 +95,9 @@ export async function buildAlerts(session: AppSession): Promise<AlertItem[]> {
   }
 
   if (canExpenses) {
-    const receivableCustomers = await Customer.find({ creditBalance: { $gt: 0 } });
+    const receivableCustomers = await Customer.find({ creditBalance: { $gt: 0 } })
+      .select("creditBalance")
+      .lean<{ creditBalance?: number }[]>();
     const accountsReceivable =
       Math.round(
         receivableCustomers.reduce((s, c) => s + (c.creditBalance || 0), 0) * 100,
@@ -111,7 +112,9 @@ export async function buildAlerts(session: AppSession): Promise<AlertItem[]> {
       });
     }
 
-    const payableSuppliers = await Supplier.find({ outstanding: { $gt: 0 } });
+    const payableSuppliers = await Supplier.find({ outstanding: { $gt: 0 } })
+      .select("outstanding")
+      .lean<{ outstanding?: number }[]>();
     const accountsPayable =
       Math.round(
         payableSuppliers.reduce((s, sup) => s + (sup.outstanding || 0), 0) * 100,

@@ -12,6 +12,7 @@ import {
 } from "@/lib/inventory/stockAdjustment";
 import { toJSON } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { canViewCostPrices, PRODUCT_COST_FIELDS, redactCostFields } from "@/lib/auth/roles";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -29,7 +30,13 @@ export async function GET(req: Request, ctx: Ctx) {
     if (!product) {
       return NextResponse.json({ error: "Product not found" }, { status: 404 });
     }
-    return NextResponse.json(toJSON(product));
+    const json = toJSON(product)!;
+    // Same rule as the product list: no cost/margin for roles that can't see cost.
+    return NextResponse.json(
+      access && !canViewCostPrices(access.role)
+        ? redactCostFields(json, PRODUCT_COST_FIELDS)
+        : json,
+    );
   } catch (error) {
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to load product") },
@@ -185,7 +192,16 @@ export async function DELETE(req: Request, ctx: Ctx) {
     // Hard delete only for a product nothing depends on: deleting one with
     // stock, FIFO cost history, sales, purchases, production or formulas
     // destroyed received stock and orphaned those records.
-    if ((await productsInUse([id])).size > 0) {
+    // Check and delete in one transaction: stock received (or sold) after the
+    // check makes the delete conflict, the retry re-checks and refuses —
+    // instead of deleting the product together with the new FIFO layers.
+    const inUse = await mongoose.connection.transaction(async (session) => {
+      if ((await productsInUse([id], session)).size > 0) return true;
+      await FifoLayer.deleteMany({ productId: id }, { session });
+      await Product.deleteOne({ _id: id }, { session });
+      return false;
+    });
+    if (inUse) {
       return NextResponse.json(
         {
           error: `${existing.name || existing.sku} has stock or history (sales, purchases, production or formulas) and can't be deleted. Set its stock to 0 and keep it for the records instead.`,
@@ -194,8 +210,6 @@ export async function DELETE(req: Request, ctx: Ctx) {
         { status: 409 },
       );
     }
-    await Product.deleteOne({ _id: id });
-    await FifoLayer.deleteMany({ productId: id });
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(

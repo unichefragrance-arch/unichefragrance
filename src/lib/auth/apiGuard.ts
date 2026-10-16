@@ -149,6 +149,14 @@ export function requireApiAccess(
       }
       return auth;
     }
+    // The catalogue export and the import screens carry cost / wholesale
+    // columns — inventory work, not the read-only catalogue the till needs.
+    if (path.startsWith("/api/products/export") || path.startsWith("/api/products/import")) {
+      if (!hasPermission(auth.role, "inventory:read")) {
+        return deny("Permission denied (inventory:read).");
+      }
+      return auth;
+    }
     if (
       !hasAnyPermission(auth.role, [
         "inventory:read",
@@ -191,10 +199,19 @@ export function requireApiAccess(
     return auth;
   }
 
+  // Header notification bell — same audience as the dashboard it mirrors.
+  // (Its sub-paths /log and /send are receipt delivery, handled below.)
+  if (path === "/api/notifications") {
+    if (!hasPermission(auth.role, "dashboard:read")) {
+      return deny("Permission denied (dashboard:read).");
+    }
+    return auth;
+  }
+
   // Receipts / notifications tied to completed sales
   if (
     path.startsWith("/api/receipts") ||
-    path.startsWith("/api/notifications")
+    path.startsWith("/api/notifications/")
   ) {
     if (
       !hasAnyPermission(auth.role, [
@@ -211,14 +228,6 @@ export function requireApiAccess(
 
   // Dashboard
   if (path.startsWith("/api/dashboard")) {
-    if (!hasPermission(auth.role, "dashboard:read")) {
-      return deny("Permission denied (dashboard:read).");
-    }
-    return auth;
-  }
-
-  // Header notification bell — same audience as the dashboard it mirrors.
-  if (path.startsWith("/api/notifications")) {
     if (!hasPermission(auth.role, "dashboard:read")) {
       return deny("Permission denied (dashboard:read).");
     }

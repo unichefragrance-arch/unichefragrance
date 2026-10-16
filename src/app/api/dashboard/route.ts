@@ -1,12 +1,11 @@
 import { moneyText, roundMoney } from "@/lib/money";
 import { NextResponse } from "next/server";
-import { Types } from "mongoose";
 import { connectDB } from "@/lib/db";
 import { Customer, Expense, Product, Sale, Supplier } from "@/lib/models";
 import { salesByTender } from "@/lib/reports/tenders";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { hasPermission } from "@/lib/auth/roles";
-import { resolveBranchScope } from "@/lib/reporting-engine/access";
+import { ownBranchMatch } from "@/lib/auth/guards";
 import type { AppSession } from "@/lib/auth/session";
 
 /** Revenue + recorded FIFO cost (inventoryDeductions[].costTotal), summed in MongoDB. */
@@ -43,11 +42,7 @@ export async function GET(req: Request) {
 
     // Non-owner roles are pinned to their own branch, matching how the
     // reporting engine scopes its queries (src/lib/reporting-engine/access.ts).
-    const branchScope = resolveBranchScope(session, null);
-    const branchFilter =
-      branchScope && Types.ObjectId.isValid(branchScope)
-        ? { branchId: new Types.ObjectId(branchScope) }
-        : {};
+    const branchFilter = ownBranchMatch(session);
 
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -122,7 +117,10 @@ export async function GET(req: Request) {
       revenue: roundMoney(revenue),
     }));
 
-    const products = await Product.find().lean();
+    // Only the fields the widgets read — this runs over the whole catalogue.
+    const products = await Product.find()
+      .select("name unit category stockSellable costFifo lowStockAt lastSoldAt")
+      .lean<{ _id: unknown; name: string; unit: string; category: string; stockSellable: number; costFifo: number; lowStockAt: number; lastSoldAt?: Date }[]>();
     const fifoValue = products.reduce(
       (s, p) => s + p.stockSellable * p.costFifo,
       0,
@@ -225,16 +223,17 @@ export async function GET(req: Request) {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
+    type ExpenseRow = { amount: number; category: string; status?: string };
     const todayExpenses = await Expense.find({
       date: { $gte: startOfToday },
       ...branchFilter,
-    });
+    }).select("amount category status").lean<ExpenseRow[]>();
     const todayExpenseTotal = todayExpenses.reduce((s, e) => s + e.amount, 0);
 
     const monthExpenses = await Expense.find({
       date: { $gte: startOfMonth },
       ...branchFilter,
-    });
+    }).select("amount category").lean<ExpenseRow[]>();
     const monthExpenseTotal = monthExpenses.reduce((s, e) => s + e.amount, 0);
 
     const expenseCategoryTotals = new Map<string, number>();
@@ -279,7 +278,7 @@ export async function GET(req: Request) {
     const lastMonthExpenses = await Expense.find({
       date: { $gte: startOfLastMonth, $lte: endOfLastMonth },
       ...branchFilter,
-    });
+    }).select("amount").lean<ExpenseRow[]>();
     const lastMonthExpenseTotal = lastMonthExpenses.reduce((s, e) => s + e.amount, 0);
     const lastMonthGrossProfit = lastMonthRevenue - lastMonthCost;
     const lastMonthNetProfit = lastMonthGrossProfit - lastMonthExpenseTotal;
@@ -297,7 +296,10 @@ export async function GET(req: Request) {
     // not an aged AR/AP report (see reporting-engine's cashClosing.ts note).
     const receivableCustomers = await Customer.find({
       creditBalance: { $gt: 0 },
-    }).sort({ creditBalance: -1 });
+    })
+      .sort({ creditBalance: -1 })
+      .select("name creditBalance")
+      .lean<{ _id: unknown; name: string; creditBalance?: number }[]>();
     const accountsReceivable = roundMoney(
       receivableCustomers.reduce((s, c) => s + (c.creditBalance || 0), 0),
     );
@@ -309,7 +311,10 @@ export async function GET(req: Request) {
 
     const payableSuppliers = await Supplier.find({
       outstanding: { $gt: 0 },
-    }).sort({ outstanding: -1 });
+    })
+      .sort({ outstanding: -1 })
+      .select("name outstanding")
+      .lean<{ _id: unknown; name: string; outstanding?: number }[]>();
     const accountsPayable = roundMoney(
       payableSuppliers.reduce((s, sup) => s + (sup.outstanding || 0), 0),
     );

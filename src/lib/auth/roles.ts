@@ -260,3 +260,19 @@ export function redactCostFields<T extends Record<string, unknown>>(
   for (const f of fields) delete copy[f];
   return copy;
 }
+
+/** Product cost/margin fields hidden from roles that may not view cost prices. */
+export const PRODUCT_COST_FIELDS = ["wholesalePrice", "costFifo", "minMarginPct"];
+
+/**
+ * A sale's FIFO cost (inventoryDeductions → costTotal, batch unitCost) is the
+ * same financial data as a product's cost — dropped for roles that may not
+ * see cost prices. The till never reads it back.
+ */
+export function redactSaleCost<T extends Record<string, unknown>>(
+  sale: T,
+  role: UserRole,
+): T {
+  if (canViewCostPrices(role)) return sale;
+  return redactCostFields(sale, ["inventoryDeductions"]);
+}

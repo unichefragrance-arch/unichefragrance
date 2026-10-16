@@ -72,6 +72,11 @@ export type CreateSaleInput = {
   discountApprovalToken?: string | null;
   status?: "completed" | "held" | "void";
   /**
+   * Aborted when the till's request is gone (disconnect / client timeout).
+   * Checked before each transaction attempt writes anything.
+   */
+  signal?: AbortSignal;
+  /**
    * POS-098: the held bill this cart was resumed from. Completing closes that
    * bill in the same transaction (only if it is still held — so one held bill
    * can never become two sales); re-holding updates it in place.
@@ -808,6 +813,16 @@ export async function createSale(input: CreateSaleInput) {
         // touching the same components don't immediately collide again.
         if (attempt++ > 0) {
           await sleep(Math.random() * Math.min(250, 10 * 2 ** attempt));
+        }
+        // Under overload a checkout can queue for its products longer than
+        // the till waits. If the till already gave up, write nothing: it
+        // retries with the same key (POS-154) and that retry makes the sale
+        // exactly once — instead of a sale nobody saw complete.
+        if (input.signal?.aborted) {
+          throw new SaleError(
+            "CHECKOUT_ABANDONED",
+            "The request was cancelled before the sale was saved — please try again.",
+          );
         }
         // 1) Reads only — stock check + FIFO plan against this snapshot.
         const planned = await planDeductions(validated.deductions, session);

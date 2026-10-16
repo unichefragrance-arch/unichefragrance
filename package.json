@@ -23,7 +23,11 @@
     "db:wipe": "tsx --env-file=.env scripts/wipe-database.ts",
     "test:unit": "node --import tsx --test \"tests/unit/**/*.test.ts\"",
     "test:unit:coverage": "node --import tsx --test --experimental-test-coverage --test-coverage-include=\"src/**\" \"tests/unit/**/*.test.ts\"",
-    "test:integration": "tsx tests/integration/run.ts"
+    "test:integration": "tsx tests/integration/run.ts",
+    "test:authz": "tsx tests/integration/authz.ts",
+    "test:stress": "tsx tests/stress/stress.ts",
+    "test:stress-regressions": "tsx tests/integration/stress-regressions.ts",
+    "test:concurrency": "tsx tests/integration/concurrency.ts"
   },
   "dependencies": {
     "clsx": "^2.1.1",

@@ -5,6 +5,7 @@ import { Quotation } from "@/lib/models";
 import { loadQuotationSettings, quotationDocFromRecord } from "@/lib/quotation/server";
 import { renderQuotationHtml } from "@/lib/quotation/template";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
+import { assertBranchAccess } from "@/lib/auth/guards";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -21,6 +22,12 @@ export async function GET(req: Request, ctx: Ctx) {
     const quotation = await Quotation.findById(id).lean<Record<string, unknown>>();
     if (!quotation) {
       return NextResponse.json({ error: "Quotation not found" }, { status: 404 });
+    }
+    // Same branch isolation as GET /api/quotations/[id] — the print is the
+    // whole quotation (customer, lines, prices).
+    if (access) {
+      const denied = assertBranchAccess(access, quotation.branchId ? String(quotation.branchId) : null);
+      if (denied) return denied;
     }
 
     const settings = await loadQuotationSettings();

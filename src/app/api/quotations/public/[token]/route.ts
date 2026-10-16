@@ -105,6 +105,13 @@ export async function POST(req: Request, ctx: Ctx) {
     if (quotation.customerDecision) {
       return NextResponse.json({ error: "A decision has already been recorded for this quotation" }, { status: 400 });
     }
+    // Staff already turned it into a sale — the link can't reopen or reject it.
+    if (quotation.status === "converted" || quotation.convertedToSaleId) {
+      return NextResponse.json({ error: "This quotation has already been converted to an order" }, { status: 400 });
+    }
+    // Two decisions sent at once (or a convert committing meanwhile): only the
+    // first save matches the state read above; the other records nothing.
+    quotation.$where = { status: quotation.status, convertedToSaleId: null, customerDecision: null };
 
     quotation.customerDecision = decision;
     quotation.customerDecisionAt = new Date();
@@ -129,6 +136,9 @@ export async function POST(req: Request, ctx: Ctx) {
     const settings = await loadQuotationSettings();
     return NextResponse.json(toPublicView(quotation, settings));
   } catch (error) {
+    if ((error as Error)?.name === "DocumentNotFoundError") {
+      return NextResponse.json({ error: "A decision has already been recorded for this quotation" }, { status: 409 });
+    }
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to record decision") },
       { status: 500 },

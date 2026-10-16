@@ -8,7 +8,7 @@ import { warmSaleCaches, type IncomingSaleLine } from "@/lib/sales/validateSale"
 import { toJSON, toJSONList } from "@/lib/serialize";
 import { isAuthResponse, isDbUnavailable, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 import { branchScopeFilter } from "@/lib/auth/guards";
-import { canViewCostPrices } from "@/lib/auth/roles";
+import { canViewCostPrices, redactSaleCost } from "@/lib/auth/roles";
 import { recordAudit } from "@/lib/audit/log";
 import { escapeRegex, loosePhoneRegex, phoneDigits } from "@/lib/phone";
 
@@ -101,7 +101,10 @@ export async function GET(req: Request) {
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();
-    return NextResponse.json(toJSONList(sales).map(mapSale));
+    const role = access && "role" in access ? access.role : null;
+    return NextResponse.json(
+      toJSONList(sales).map((s) => mapSale(role ? redactSaleCost(s, role) : s)),
+    );
   } catch (error) {
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to load sales") },
@@ -155,6 +158,7 @@ export async function POST(req: Request) {
       resumedFromId: body.resumedFromId,
       idempotencyKey: body.idempotencyKey,
       branchId: access?.branchId ?? undefined,
+      signal: req.signal,
       branchName: access?.branchName ?? undefined,
     });
 
@@ -181,7 +185,12 @@ export async function POST(req: Request) {
       });
     }
 
-    const payload = { ...mapSale(toJSON(sale)!), deduplicated, timingMs };
+    const saleJson = toJSON(sale)!;
+    const payload = {
+      ...mapSale(access ? redactSaleCost(saleJson, access.role) : saleJson),
+      deduplicated,
+      timingMs,
+    };
     const res = NextResponse.json(payload, {
       status: deduplicated ? 200 : 201,
     });
@@ -211,7 +220,10 @@ export async function POST(req: Request) {
     const isConflict =
       error instanceof SaleError &&
       (error.code === "HELD_BILL_UNAVAILABLE" || error.code === "IDEMPOTENCY_CONFLICT");
-    const status = isConflict
+    const abandoned = error instanceof SaleError && error.code === "CHECKOUT_ABANDONED";
+    const status = abandoned
+      ? 503
+      : isConflict
       ? 409
       : isDiscountDenied
         ? 403
