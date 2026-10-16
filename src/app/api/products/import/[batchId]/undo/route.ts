@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
+import { productsInUse } from "@/lib/inventory/productUsage";
 import { FifoLayer, ImportBatch, Product } from "@/lib/models";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
@@ -23,6 +24,31 @@ export async function POST(req: Request, ctx: Ctx) {
         { error: "Only the most recent committed import can be undone" },
         { status: 400 },
       );
+    }
+
+    // Import creates products with no stock and no FIFO layers, so a layer,
+    // any bucket quantity, or a sale / purchase line on one of them is activity
+    // AFTER the import. Deleting those products used to destroy received stock,
+    // its cost history and the products that sales still point to. Refuse the
+    // whole undo — nothing is deleted — and say which products are in use.
+    const createdIds = latest.rows
+      .filter((r: { action?: string; createdProductId?: unknown }) => r.action === "create" && r.createdProductId)
+      .map((r: { createdProductId: unknown }) => r.createdProductId);
+    if (createdIds.length > 0) {
+      const inUse = await productsInUse(createdIds);
+      if (inUse.size > 0) {
+        const names = await Product.find({ _id: { $in: [...inUse] } }).select("sku name").lean<{ sku: string; name: string }[]>();
+        return NextResponse.json(
+          {
+            error: `This import can't be undone: ${inUse.size} imported product(s) have stock, purchases or sales since the import (${names
+              .slice(0, 5)
+              .map((n) => n.sku || n.name)
+              .join(", ")}${names.length > 5 ? ", …" : ""}). Nothing was changed.`,
+            code: "IMPORT_IN_USE",
+          },
+          { status: 409 },
+        );
+      }
     }
 
     let deleted = 0;
@@ -55,9 +81,16 @@ export async function POST(req: Request, ctx: Ctx) {
         if (!product) continue;
         product.name = snap.name;
         product.category = snap.category;
-        product.unit = snap.unit;
+        // Same rules as the import: unit can't change while the product holds
+        // stock, and FIFO cost stays derived from the layers.
+        const holdsStock =
+          (Number(product.stockSellable) || 0) !== 0 ||
+          Boolean(await FifoLayer.exists({ productId: product._id, qtyRemaining: { $gt: 0 } }));
+        if (!holdsStock) {
+          product.unit = snap.unit;
+          product.costFifo = snap.costFifo;
+        }
         product.minMarginPct = snap.minMarginPct;
-        product.costFifo = snap.costFifo;
         product.sellPrice = snap.sellPrice;
         product.wholesalePrice = snap.wholesalePrice ?? 0;
         product.brand = snap.brand || "";

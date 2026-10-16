@@ -2,7 +2,9 @@ import mongoose from "mongoose";
 import { roundMoney } from "@/lib/money";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
+import { addFifoLayer } from "@/lib/inventory";
 import { PurchaseOrder } from "@/lib/models";
+import { purchaseLineUnitError } from "@/lib/purchases/lineUnits";
 import {
   applyFifoFromPurchase,
   derivePurchaseStatus,
@@ -32,6 +34,28 @@ function mapPO(p: Record<string, unknown>) {
     date: p.date ? new Date(p.date as string).toISOString().slice(0, 10) : null,
     lines,
   };
+}
+
+/** Another request received / edited this PO after it was loaded. */
+class PurchaseConflictError extends Error {
+  constructor() {
+    super("This purchase was just updated by another request. Reload it and try again.");
+    this.name = "PurchaseConflictError";
+  }
+}
+
+/** productId → qty already turned into FIFO layers (only lines that have any). */
+function appliedByProduct(lines: Array<{ productId?: unknown; qtyFifoApplied?: number }>) {
+  const out = new Map<string, number>();
+  for (const l of lines) {
+    const applied = Number(l.qtyFifoApplied) || 0;
+    if (applied > 0) out.set(String(l.productId), (out.get(String(l.productId)) ?? 0) + applied);
+  }
+  return out;
+}
+
+function sameApplied(a: Map<string, number>, b: Map<string, number>) {
+  return a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
 }
 
 type LineBody = {
@@ -65,6 +89,8 @@ export async function PUT(req: Request, ctx: Ctx) {
       const denied = assertBranchAccess(access, purchase.branchId ? String(purchase.branchId) : null);
       if (denied) return denied;
     }
+    // What was already turned into stock when this request loaded the PO.
+    const loadedApplied = appliedByProduct(purchase.lines);
 
     // Received goods already sit in FIFO layers stamped with this PO's date,
     // cost and qty — those inputs are historical and locked once applied.
@@ -182,10 +208,9 @@ export async function PUT(req: Request, ctx: Ctx) {
     }
     purchase.status = status as typeof purchase.status;
 
-    // Apply FIFO for any newly received qty
-    if (purchase.lines.length && (status === "received" || status === "partial")) {
-      await applyFifoFromPurchase(purchase);
-      purchase.markModified("lines");
+    const unitError = await purchaseLineUnitError(purchase.lines);
+    if (unitError) {
+      return NextResponse.json({ error: unitError }, { status: 400 });
     }
 
     // PUR-12: first time this PO lands fully received, stamp it and refresh supplier lead time.
@@ -193,7 +218,31 @@ export async function PUT(req: Request, ctx: Ctx) {
       purchase.receivedAt = new Date();
     }
 
-    await purchase.save();
+    // New FIFO layers, the stock they add and the PO's qtyFifoApplied commit
+    // together or not at all. Without this, a failed save (or a second,
+    // concurrent receive of the same PO) left layers + stock behind and the
+    // next attempt added them again. connection.transaction() also resets the
+    // document's save state when the driver retries the callback.
+    const receiving = purchase.lines.length > 0 && (status === "received" || status === "partial");
+    await mongoose.connection.transaction(async (session) => {
+      for (const line of purchase.lines) {
+        line.qtyFifoApplied = loadedApplied.get(String(line.productId)) ?? 0;
+      }
+      const fresh = await PurchaseOrder.findById(purchase._id)
+        .session(session)
+        .select("lines.productId lines.qtyFifoApplied")
+        .lean<{ lines?: Array<{ productId: unknown; qtyFifoApplied?: number }> }>();
+      if (!fresh || !sameApplied(appliedByProduct(fresh.lines ?? []), loadedApplied)) {
+        throw new PurchaseConflictError();
+      }
+      if (receiving) {
+        await applyFifoFromPurchase(purchase, {
+          addFifoLayer: (input) => addFifoLayer(input, { session }),
+        });
+        purchase.markModified("lines");
+      }
+      await purchase.save({ session });
+    });
 
     if (status === "received") {
       void recalcSupplierAvgLeadDays(String(purchase.supplierId));
@@ -209,6 +258,9 @@ export async function PUT(req: Request, ctx: Ctx) {
     });
     return NextResponse.json(mapPO(toJSON(purchase)!));
   } catch (error) {
+    if (error instanceof PurchaseConflictError || (error as Error)?.name === "VersionError") {
+      return NextResponse.json({ error: new PurchaseConflictError().message }, { status: 409 });
+    }
     return NextResponse.json(
       { error: safeErrorMessage(error, "Failed to update purchase") },
       { status: 400 },

@@ -3,7 +3,13 @@ import { connectDB } from "@/lib/db";
 import { FifoLayer, Product } from "@/lib/models";
 import mongoose from "mongoose";
 import { recordAudit } from "@/lib/audit/log";
-import { setSellableStock, StockAdjustmentError } from "@/lib/inventory/stockAdjustment";
+import { productsInUse } from "@/lib/inventory/productUsage";
+import {
+  assertBucketQty,
+  NON_FIFO_BUCKETS,
+  setSellableStock,
+  StockAdjustmentError,
+} from "@/lib/inventory/stockAdjustment";
 import { toJSON } from "@/lib/serialize";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
@@ -84,6 +90,20 @@ export async function PUT(req: Request, ctx: Ctx) {
     for (const key of EDITABLE_FIELDS) {
       if (body[key] !== undefined) update[key] = body[key];
     }
+    // Tester / sample / personal are set by number: never negative or non-numeric
+    // (transfers and count corrections already refuse to go below zero).
+    try {
+      for (const key of NON_FIFO_BUCKETS) {
+        if (update[key] !== undefined) {
+          update[key] = assertBucketQty(update[key], String(update.unit ?? existing.unit), key);
+        }
+      }
+    } catch (err) {
+      if (err instanceof StockAdjustmentError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
     // Changing ml ↔ pcs would reinterpret every existing layer / tola deduction.
     if (update.unit !== undefined && update.unit !== existing.unit) {
       const hasStock =
@@ -158,10 +178,23 @@ export async function DELETE(req: Request, ctx: Ctx) {
     if (!mongoose.isValidObjectId(id)) {
       return NextResponse.json({ error: "Invalid product id" }, { status: 400 });
     }
-    const product = await Product.findByIdAndDelete(id);
-    if (!product) {
+    const existing = await Product.findById(id).select("sku name").lean<{ sku?: string; name?: string }>();
+    if (!existing) {
       return NextResponse.json({ error: "Product not found" }, { status: 404 });
     }
+    // Hard delete only for a product nothing depends on: deleting one with
+    // stock, FIFO cost history, sales, purchases, production or formulas
+    // destroyed received stock and orphaned those records.
+    if ((await productsInUse([id])).size > 0) {
+      return NextResponse.json(
+        {
+          error: `${existing.name || existing.sku} has stock or history (sales, purchases, production or formulas) and can't be deleted. Set its stock to 0 and keep it for the records instead.`,
+          code: "PRODUCT_IN_USE",
+        },
+        { status: 409 },
+      );
+    }
+    await Product.deleteOne({ _id: id });
     await FifoLayer.deleteMany({ productId: id });
     return NextResponse.json({ ok: true });
   } catch (error) {

@@ -433,9 +433,10 @@ export async function addFifoLayer(input: {
   currency: string;
   /** Goods receipt this layer came from (audit trail). */
   purchaseOrderId?: string | null;
-}) {
+}, opts: SessionOpt = {}) {
+  const session = opts.session ?? undefined;
   const qty = roundQty(input.qty);
-  const layer = await FifoLayer.create({
+  const [layer] = await FifoLayer.create([{
     productId: input.productId,
     supplierId: input.supplierId,
     supplierName: input.supplierName,
@@ -446,15 +447,17 @@ export async function addFifoLayer(input: {
     currency: input.currency,
     source: "purchase",
     purchaseOrderId: input.purchaseOrderId ?? null,
-  });
+  }], { session });
 
   // Atomic + rounded (was read-modify-write, which could lose a concurrent update).
+  // With a session, the layer and the stock commit (or roll back) together.
   const res = await Product.collection.updateOne(
     { _id: new mongoose.Types.ObjectId(input.productId) },
     [{ $set: { stockSellable: addRounded("$stockSellable", qty) } }],
+    { session },
   );
   if (res.matchedCount > 0) {
-    await refreshCostFifo(input.productId);
+    await refreshCostFifo(input.productId, { session: session ?? null });
   }
 
   return layer;
@@ -470,13 +473,14 @@ export async function addProductionFifoLayer(input: {
   qty: number;
   unitCost: number;
   currency: string;
-}) {
+}, opts: SessionOpt = {}) {
   if (!(input.qty > 0)) {
     throw new SaleError("VALIDATION", "Production output qty must be greater than 0");
   }
 
+  const session = opts.session ?? undefined;
   const qty = roundQty(input.qty);
-  const layer = await FifoLayer.create({
+  const [layer] = await FifoLayer.create([{
     productId: input.productId,
     supplierId: input.supplierId,
     supplierName: input.supplierName,
@@ -487,18 +491,20 @@ export async function addProductionFifoLayer(input: {
     currency: input.currency,
     source: "production",
     productionOrderId: input.productionOrderId,
-  });
+  }], { session });
 
   const res = await Product.collection.updateOne(
     { _id: new mongoose.Types.ObjectId(input.productId) },
     [{ $set: { stockSellable: addRounded("$stockSellable", qty) } }],
-    { writeConcern: FAST_WC },
+    // Inside a transaction the write concern belongs to the commit, not the op.
+    session ? { session } : { writeConcern: FAST_WC },
   );
   if (res.matchedCount === 0) {
-    await FifoLayer.findByIdAndDelete(layer._id);
+    // In a transaction the abort removes the layer; otherwise delete it here.
+    if (!session) await FifoLayer.findByIdAndDelete(layer._id);
     throw new SaleError("PRODUCT_NOT_FOUND", "Output product not found");
   }
 
-  await refreshCostFifo(input.productId);
+  await refreshCostFifo(input.productId, { session: session ?? null });
   return layer;
 }

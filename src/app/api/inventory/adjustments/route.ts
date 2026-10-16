@@ -357,15 +357,68 @@ export async function POST(req: Request) {
       const releaseClaim = () =>
         claimId ? InventoryAdjustment.deleteOne({ _id: claimId }).catch(() => undefined) : undefined;
 
-      // Fast path: deductFifoMany already enforces sellable + FIFO (no pre-check RTT).
+      // The FIFO deduction, the expense (cost wastage) and the adjustment record
+      // commit together. Before, the stock left first and a failure saving the
+      // record (or finalizing a keyed claim) lost stock with no record, or left
+      // the claim pending so every retry answered IN_PROGRESS.
       let costTotal = 0;
+      let expenseId: string | undefined;
+      let adjustmentId: string | undefined;
       try {
-        const map = await deductFifoMany([
-          { productId, qty, productName: product.name },
-        ]);
-        costTotal = Number(
-          (map.get(productId)?.costTotal ?? 0).toFixed(3),
-        );
+        await mongoose.connection.transaction(async (session) => {
+          const map = await deductFifoMany([{ productId, qty, productName: product.name }], { session });
+          costTotal = Number((map.get(productId)?.costTotal ?? 0).toFixed(3));
+
+          let expense: { _id: mongoose.Types.ObjectId } | undefined;
+          if (reason === "wastage_cost") {
+            [expense] = await Expense.create(
+              [{
+                date: new Date(),
+                category: "Wastage",
+                detail:
+                  notes ||
+                  `INV-07 wastage (cost): ${product.name} × ${qty}${product.unit ? ` ${product.unit}` : ""}`,
+                amount: costTotal,
+                status: "approved",
+                ...branchStamp,
+              }],
+              { session },
+            );
+          }
+          const fields: Record<string, unknown> =
+            reason === "wastage_cost"
+              ? {
+                  productId: product._id,
+                  productName: product.name,
+                  qty,
+                  direction: "out",
+                  reason: "wastage_cost",
+                  liability: "cost",
+                  costTotal,
+                  notes: notes || "Other wasted product recorded as cost",
+                  createdBy,
+                  expenseId: expense!._id,
+                }
+              : {
+                  productId: product._id,
+                  productName: product.name,
+                  qty,
+                  direction: "out",
+                  reason: "adjustment",
+                  costTotal,
+                  notes: notes || "Stock adjustment out",
+                  createdBy,
+                };
+          // With a key, the claimed record becomes the adjustment; otherwise create it.
+          if (claimId) {
+            await InventoryAdjustment.updateOne({ _id: claimId }, { $set: fields, $unset: { pending: 1 } }, { session });
+            adjustmentId = String(claimId);
+          } else {
+            const [adj] = await InventoryAdjustment.create([{ ...fields, ...branchStamp }], { session });
+            adjustmentId = String(adj._id);
+          }
+          expenseId = expense ? String(expense._id) : undefined;
+        });
       } catch (err) {
         await releaseClaim();
         if (err instanceof SaleError) {
@@ -382,63 +435,6 @@ export async function POST(req: Request) {
       }
 
       const stockAfter = stockBefore - qty;
-      let expenseId: string | undefined;
-      let adjustmentId: string | undefined;
-
-      // With a key, the claimed record becomes the adjustment; otherwise create it.
-      const saveAdjustment = async (fields: Record<string, unknown>) => {
-        if (!claimId) return InventoryAdjustment.create({ ...fields, ...branchStamp });
-        await InventoryAdjustment.updateOne({ _id: claimId }, { $set: fields, $unset: { pending: 1 } });
-        return { _id: claimId };
-      };
-
-      if (reason === "wastage_cost") {
-        const [expense, adjustment] = await Promise.all([
-          Expense.create({
-            date: new Date(),
-            category: "Wastage",
-            detail:
-              notes ||
-              `INV-07 wastage (cost): ${product.name} × ${qty}${
-                product.unit ? ` ${product.unit}` : ""
-              }`,
-            amount: costTotal,
-            status: "approved",
-            ...branchStamp,
-          }),
-          saveAdjustment({
-            productId: product._id,
-            productName: product.name,
-            qty,
-            direction: "out",
-            reason: "wastage_cost",
-            liability: "cost",
-            costTotal,
-            notes:
-              notes || "Other wasted product recorded as cost",
-            createdBy,
-          }),
-        ]);
-        expenseId = String(expense._id);
-        adjustmentId = String(adjustment._id);
-        // Link expense on adjustment (non-blocking best-effort)
-        void InventoryAdjustment.updateOne(
-          { _id: adjustment._id },
-          { $set: { expenseId: expense._id } },
-        ).exec();
-      } else {
-        const adjustment = await saveAdjustment({
-          productId: product._id,
-          productName: product.name,
-          qty,
-          direction: "out",
-          reason: "adjustment",
-          costTotal,
-          notes: notes || "Stock adjustment out",
-          createdBy,
-        });
-        adjustmentId = String(adjustment._id);
-      }
 
       recordAudit({
         session: access,
@@ -476,29 +472,10 @@ export async function POST(req: Request) {
       if ("response" in claim) return claim.response;
       inClaimId = claim.id;
     }
-    let layer: Awaited<ReturnType<typeof addFifoLayer>>;
-    try {
-      const supplierId = await adjustmentSupplierId();
-
-      const unitCost = Number(body.unitCost);
-      layer = await addFifoLayer({
-        productId,
-        supplierId,
-        supplierName: ADJUSTMENT_SUPPLIER,
-        purchaseDate: new Date(),
-        qty,
-        unitCost: Number.isFinite(unitCost) && unitCost >= 0
-          ? unitCost
-          : Number(product.costFifo) || 0,
-        currency: "OMR",
-      });
-    } catch (err) {
-      if (inClaimId) await InventoryAdjustment.deleteOne({ _id: inClaimId }).catch(() => undefined);
-      throw err;
-    }
+    // The new FIFO layer (stock) and its adjustment record commit together;
+    // on failure nothing moved and the claim is released so a retry can run.
     const stockBefore = Number(product.stockSellable) || 0;
     const stockAfter = stockBefore + qty;
-
     const inFields = {
       productId: product._id,
       productName: product.name,
@@ -509,9 +486,37 @@ export async function POST(req: Request) {
       notes: notes || "Restock adjustment",
       createdBy,
     };
-    const adjustment = inClaimId
-      ? (await InventoryAdjustment.updateOne({ _id: inClaimId }, { $set: inFields, $unset: { pending: 1 } }), { _id: inClaimId })
-      : await InventoryAdjustment.create({ ...inFields, ...branchStamp });
+    const supplierId = await adjustmentSupplierId();
+    const requestedCost = Number(body.unitCost);
+    let layer!: Awaited<ReturnType<typeof addFifoLayer>>;
+    let adjustment!: { _id: unknown };
+    try {
+      await mongoose.connection.transaction(async (session) => {
+        layer = await addFifoLayer(
+          {
+            productId,
+            supplierId,
+            supplierName: ADJUSTMENT_SUPPLIER,
+            purchaseDate: new Date(),
+            qty,
+            unitCost: Number.isFinite(requestedCost) && requestedCost >= 0
+              ? requestedCost
+              : Number(product.costFifo) || 0,
+            currency: "OMR",
+          },
+          { session },
+        );
+        if (inClaimId) {
+          await InventoryAdjustment.updateOne({ _id: inClaimId }, { $set: inFields, $unset: { pending: 1 } }, { session });
+          adjustment = { _id: inClaimId };
+        } else {
+          [adjustment] = await InventoryAdjustment.create([{ ...inFields, ...branchStamp }], { session });
+        }
+      });
+    } catch (err) {
+      if (inClaimId) await InventoryAdjustment.deleteOne({ _id: inClaimId }).catch(() => undefined);
+      throw err;
+    }
 
     recordAudit({
       session: access,

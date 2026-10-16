@@ -131,33 +131,44 @@ export async function POST(req: Request) {
         },
         { status: 400 },
       );
-    if (from === "stockSellable") {
-      try {
-        await deductFifoMany([{ productId, qty, productName: product.name }]);
-      } catch (err) {
-        if (err instanceof SaleError) return insufficient();
-        throw err;
-      }
-      await Product.updateOne({ _id: product._id }, { $inc: { [to]: qty } });
-    } else {
-      const taken = await Product.updateOne(
-        { _id: product._id, [from]: { $gte: qty } },
-        { $inc: { [from]: -qty } },
-      );
-      if (taken.modifiedCount === 0) return insufficient();
-      if (to === "stockSellable") {
-        await addFifoLayer({
-          productId,
-          supplierId: await adjustmentSupplierId(),
-          supplierName: ADJUSTMENT_SUPPLIER,
-          purchaseDate: new Date(),
-          qty,
-          unitCost: Number(product.costFifo) || 0,
-          currency: "OMR",
-        });
-      } else {
-        await Product.updateOne({ _id: product._id }, { $inc: { [to]: qty } });
-      }
+    // Both halves of a transfer commit together: before, the source write
+    // committed on its own and a failure on the destination write lost the
+    // units (or, for → sellable, left them neither in the bucket nor in FIFO).
+    const supplierId = to === "stockSellable" ? await adjustmentSupplierId() : null;
+    try {
+      await mongoose.connection.transaction(async (session) => {
+        if (from === "stockSellable") {
+          await deductFifoMany([{ productId, qty, productName: product.name }], { session });
+        } else {
+          const taken = await Product.updateOne(
+            { _id: product._id, [from]: { $gte: qty } },
+            { $inc: { [from]: -qty } },
+            { session },
+          );
+          if (taken.modifiedCount === 0) {
+            throw new SaleError("INSUFFICIENT_STOCK", `Insufficient ${from}`);
+          }
+        }
+        if (to === "stockSellable") {
+          await addFifoLayer(
+            {
+              productId,
+              supplierId: supplierId!,
+              supplierName: ADJUSTMENT_SUPPLIER,
+              purchaseDate: new Date(),
+              qty,
+              unitCost: Number(product.costFifo) || 0,
+              currency: "OMR",
+            },
+            { session },
+          );
+        } else {
+          await Product.updateOne({ _id: product._id }, { $inc: { [to]: qty } }, { session });
+        }
+      });
+    } catch (err) {
+      if (err instanceof SaleError) return insufficient();
+      throw err;
     }
     const saved = await Product.findById(product._id);
 

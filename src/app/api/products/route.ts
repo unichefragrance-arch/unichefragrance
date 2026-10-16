@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import { defaultLowStockAt } from "@/lib/inventory/stockCheck";
-import { setSellableStock, StockAdjustmentError } from "@/lib/inventory/stockAdjustment";
+import {
+  assertBucketQty,
+  NON_FIFO_BUCKETS,
+  setSellableStock,
+  StockAdjustmentError,
+} from "@/lib/inventory/stockAdjustment";
 import { Product } from "@/lib/models";
 import { escapeRegex } from "@/lib/phone";
 import { toJSON, toJSONList } from "@/lib/serialize";
@@ -9,6 +14,8 @@ import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/a
 import { canViewCostPrices, redactCostFields } from "@/lib/auth/roles";
 
 const COST_FIELDS = ["wholesalePrice", "costFifo", "minMarginPct"];
+/** Set by the server only — never accepted from a create request. */
+const SERVER_OWNED_FIELDS = ["_id", "id", "__v", "createdAt", "updatedAt", "importBatchId"];
 
 export async function GET(req: Request) {
   try {
@@ -66,10 +73,23 @@ export async function POST(req: Request) {
     }
     // Opening stock is booked as a FIFO layer at the given cost — never a bare
     // number — so stockSellable always equals the FIFO total.
+    // Server-owned fields are never taken from the client (ids, timestamps,
+    // import ownership); everything else is a catalogue field.
     const { stockSellable: opening, costFifo, ...rest } = body as Record<string, unknown>;
+    for (const key of SERVER_OWNED_FIELDS) delete rest[key];
     const openingQty = Number(opening) || 0;
     if (openingQty < 0) {
       return NextResponse.json({ error: "Opening stock can't be negative" }, { status: 400 });
+    }
+    try {
+      for (const key of NON_FIFO_BUCKETS) {
+        if (rest[key] !== undefined) rest[key] = assertBucketQty(rest[key], String(rest.unit ?? "pcs"), key);
+      }
+    } catch (err) {
+      if (err instanceof StockAdjustmentError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
     }
     const created = await Product.create({ ...rest, stockSellable: 0, costFifo: Number(costFifo) || 0 });
     if (openingQty > 0) {

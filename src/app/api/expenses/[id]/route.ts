@@ -30,6 +30,12 @@ export async function PUT(req: Request, ctx: Ctx) {
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       return NextResponse.json({ error: "Request body must be a JSON object" }, { status: 400 });
     }
+    // A plain object of fields only: update operators ($set / $unset / …) would
+    // reach Mongo as-is and get round the field rules below (e.g. move the
+    // expense to another branch with {"$set":{"branchId":…}}).
+    if (Object.keys(body).some((k) => k.startsWith("$") || k.includes("."))) {
+      return NextResponse.json({ error: "Invalid expense update" }, { status: 400 });
+    }
     // The branch is set from the creator's session, never moved by an edit.
     delete body.branchId;
     delete body.branchName;

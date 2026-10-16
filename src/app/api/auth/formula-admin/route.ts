@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { safeErrorMessage } from "@/lib/auth/apiGuard";
+import { clearLoginAttempts, reserveLoginAttempt } from "@/lib/auth/rateLimit";
 import {
   clearFormulaAdminCookieHeader,
   createFormulaAdminToken,
@@ -39,6 +40,26 @@ export async function POST(req: Request) {
     };
 
     if (
+      (body.email !== undefined && typeof body.email !== "string") ||
+      (body.password !== undefined && typeof body.password !== "string") ||
+      (body.name !== undefined && typeof body.name !== "string")
+    ) {
+      return NextResponse.json({ error: "Email and password must be text." }, { status: 400 });
+    }
+    const email = (body.email || "").trim().toLowerCase();
+
+    // This public endpoint checks ADMIN_PASSWORD — the owner's password too —
+    // so it gets the same lockout as login (own bucket), or it would be an
+    // unlimited guessing oracle that sidesteps the login lockout.
+    const rl = await reserveLoginAttempt(`formula-admin:${email}`);
+    if (rl.blocked) {
+      return NextResponse.json(
+        { error: "Too many attempts. Try again later." },
+        { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } },
+      );
+    }
+
+    if (
       !verifyFormulaAdminCredentials({
         email: body.email,
         password: body.password,
@@ -49,8 +70,8 @@ export async function POST(req: Request) {
         { status: 403 },
       );
     }
+    void clearLoginAttempts(`formula-admin:${email}`);
 
-    const email = (body.email || "").trim().toLowerCase();
     const name = (body.name || email || "Admin").trim() || "Admin";
     const token = createFormulaAdminToken(name, email);
     const res = NextResponse.json({ unlocked: true, name, email });

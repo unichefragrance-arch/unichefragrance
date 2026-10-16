@@ -36,6 +36,13 @@ async function loginHandler(req: Request) {
     email?: string;
     password?: string;
   };
+  // Objects / arrays / numbers are refused here (they used to throw → HTTP 500).
+  if (
+    (body.email !== undefined && typeof body.email !== "string") ||
+    (body.password !== undefined && typeof body.password !== "string")
+  ) {
+    return NextResponse.json({ error: "Email and password must be text." }, { status: 400 });
+  }
   const email = (body.email || "").trim().toLowerCase();
   const password = body.password || "";
 

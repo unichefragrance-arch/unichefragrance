@@ -60,7 +60,8 @@ function metaBlock(doc: QuotationDoc): string {
 }
 
 function lineDesc(line: QuotationDocLine): string {
-  return line.note ? `${line.name}<span class="note">${esc(line.note)}</span>` : line.name;
+  // Line names are user input (quotation editor, public customer link) — escape like everything else.
+  return line.note ? `${esc(line.name)}<span class="note">${esc(line.note)}</span>` : esc(line.name);
 }
 
 function linesTable(doc: QuotationDoc): string {

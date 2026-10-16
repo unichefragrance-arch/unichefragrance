@@ -18,6 +18,14 @@ export async function PUT(req: Request, ctx: Ctx) {
       return NextResponse.json({ error: "Invalid supplier id" }, { status: 400 });
     }
     const body = await req.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return NextResponse.json({ error: "Request body must be a JSON object" }, { status: 400 });
+    }
+    // Fields only — no update operators passed through to Mongo.
+    if (Object.keys(body).some((k) => k.startsWith("$") || k.includes("."))) {
+      return NextResponse.json({ error: "Invalid supplier update" }, { status: 400 });
+    }
+    delete body._id;
     if (body.lastPurchase) body.lastPurchase = new Date(body.lastPurchase);
     const supplier = await Supplier.findByIdAndUpdate(id, body, {
       new: true,

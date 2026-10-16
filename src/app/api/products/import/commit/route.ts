@@ -9,7 +9,7 @@ import {
 } from "@/lib/excel/validate";
 import { defaultLowStockAt } from "@/lib/inventory/stockCheck";
 import { importOverridePasswordValid } from "@/lib/excel/importOverride";
-import { ImportBatch, Product } from "@/lib/models";
+import { FifoLayer, ImportBatch, Product } from "@/lib/models";
 import { isAuthResponse, requireApiAccess, safeErrorMessage } from "@/lib/auth/apiGuard";
 
 export const runtime = "nodejs";
@@ -138,6 +138,49 @@ export async function POST(req: Request) {
       );
     }
 
+    // Products already holding FIFO stock: their unit can't change (every layer
+    // and tola deduction is in that unit — the product edit refuses it too) and
+    // their costFifo is derived from the layers, so the file's cost doesn't
+    // overwrite it. A unit change for a stocked product blocks the whole commit
+    // before anything is written.
+    const updateSkus = rows
+      .filter((r: { action?: string; payload?: unknown }) => r.action === "update" && r.payload)
+      .map((r: { payload?: Record<string, unknown> }) => String(r.payload!.sku));
+    const stockedBySku = new Map<string, { unit: string }>();
+    if (updateSkus.length > 0) {
+      const existingProducts = await Product.find({ sku: { $in: updateSkus } })
+        .select("sku unit stockSellable")
+        .lean<{ _id: unknown; sku: string; unit: string; stockSellable?: number }[]>();
+      const withLayers = new Set(
+        (await FifoLayer.distinct("productId", {
+          productId: { $in: existingProducts.map((p) => p._id) },
+          qtyRemaining: { $gt: 0 },
+        })).map(String),
+      );
+      for (const p of existingProducts) {
+        if ((Number(p.stockSellable) || 0) !== 0 || withLayers.has(String(p._id))) {
+          stockedBySku.set(p.sku, { unit: p.unit });
+        }
+      }
+      const unitChanges = rows
+        .filter((r: { action?: string; payload?: Record<string, unknown> }) => r.action === "update" && r.payload)
+        .map((r: { payload?: Record<string, unknown> }) => r.payload!)
+        .filter((pl: Record<string, unknown>) => {
+          const stocked = stockedBySku.get(String(pl.sku));
+          return stocked && pl.unit !== undefined && String(pl.unit) !== stocked.unit;
+        })
+        .map((pl: Record<string, unknown>) => String(pl.sku));
+      if (unitChanges.length > 0) {
+        return NextResponse.json(
+          {
+            error: `Unit can't change while these products hold stock: ${unitChanges.slice(0, 10).join(", ")}${unitChanges.length > 10 ? ", …" : ""}. Nothing was imported.`,
+            code: "UNIT_CHANGE_WITH_STOCK",
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     let createdCount = 0;
     let updatedCount = 0;
 
@@ -224,7 +267,7 @@ export async function POST(req: Request) {
           existing.unit = payload.unit as "ml" | "pcs";
           existing.brand = String(payload.brand || "");
           existing.concentration = String(payload.concentration || "");
-          existing.costFifo = Number(payload.costFifo);
+          if (!stockedBySku.has(existing.sku)) existing.costFifo = Number(payload.costFifo);
           existing.sellPrice = Number(payload.sellPrice);
           existing.wholesalePrice = Number(payload.wholesalePrice || 0);
           existing.gender = String(payload.gender || "");

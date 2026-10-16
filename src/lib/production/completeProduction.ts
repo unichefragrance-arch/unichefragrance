@@ -3,7 +3,6 @@ import mongoose from "mongoose";
 import {
   addProductionFifoLayer,
   deductFifoMany,
-  restoreFifo,
   type DeductFifoResult,
 } from "@/lib/inventory";
 import { Product, ProductionOrder, Supplier } from "@/lib/models";
@@ -238,96 +237,77 @@ export async function completeProductionOrder(
       qty: Number(l.qty),
     }));
 
-    let deductMap: Map<string, DeductFifoResult>;
-    try {
-      deductMap = await deductFifoMany(needs, { skipCostUpdate: false });
-    } catch (err) {
-      if (err instanceof SaleError) throw err;
-      throw err;
-    }
+    // Materials out, finished goods in and the order's "completed" state commit
+    // together or not at all. Before, each step committed on its own: a failure
+    // saving the order left materials consumed and output added under a draft
+    // order, and the next attempt consumed them again.
+    const supplier = await ensureProductionSupplier();
+    await mongoose.connection.transaction(async (session) => {
+      const deductMap: Map<string, DeductFifoResult> = await deductFifoMany(needs, { session });
 
-    const consumption = (order.plannedLines as PlannedLine[]).map((l) => {
-      const result = deductMap.get(String(l.productId)) ?? {
-        costTotal: 0,
-        batches: [],
-      };
-      return {
-        productId: l.productId,
-        productName: l.productName,
-        qty: Number(l.qty),
-        reason: l.reason,
-        costTotal: Number(result.costTotal.toFixed(3)),
-        batches: result.batches.map((b) => ({
-          layerId: b.layerId,
-          qty: b.qty,
-          unitCost: b.unitCost,
-          purchaseDate: b.purchaseDate,
-        })),
-      };
-    });
-
-    const totalMaterialCost = Number(
-      consumption.reduce((s, c) => s + c.costTotal, 0).toFixed(3),
-    );
-    const unitCost = Number(
-      (totalMaterialCost / Math.max(order.outputQty, 1e-9)).toFixed(3),
-    );
-
-    const batchNumber = newBatchNumber();
-    const producedAt = new Date();
-
-    let layerId: string | undefined;
-    try {
-      const supplier = await ensureProductionSupplier();
-      const layer = await addProductionFifoLayer({
-        productId: String(order.outputProductId),
-        supplierId: String(supplier._id),
-        supplierName: `${PRODUCTION_SUPPLIER_NAME} · ${batchNumber}`,
-        productionOrderId: String(order._id),
-        purchaseDate: producedAt,
-        qty: order.outputQty,
-        unitCost,
-        currency: "OMR",
+      const consumption = (order.plannedLines as PlannedLine[]).map((l) => {
+        const result = deductMap.get(String(l.productId)) ?? {
+          costTotal: 0,
+          batches: [],
+        };
+        return {
+          productId: l.productId,
+          productName: l.productName,
+          qty: Number(l.qty),
+          reason: l.reason,
+          costTotal: Number(result.costTotal.toFixed(3)),
+          batches: result.batches.map((b) => ({
+            layerId: b.layerId,
+            qty: b.qty,
+            unitCost: b.unitCost,
+            purchaseDate: b.purchaseDate,
+          })),
+        };
       });
-      layerId = String(layer._id);
-    } catch (err) {
-      // Roll back material deductions if finished-goods layer fails
-      await Promise.all(
-        consumption.map((c) =>
-          restoreFifo(String(c.productId), {
-            costTotal: c.costTotal,
-            batches: c.batches.map((b) => ({
-              layerId: String(b.layerId),
-              qty: b.qty,
-              unitCost: b.unitCost,
-              purchaseDate: b.purchaseDate,
-            })),
-          }),
-        ),
-      );
-      throw err;
-    }
 
-    order.status = "completed";
-    order.consumption = consumption;
-    order.batch = {
-      batchNumber,
-      producedAt,
-      outputProductId: order.outputProductId,
-      outputProductName: order.outputProductName,
-      outputSku: order.outputSku,
-      outputQty: order.outputQty,
-      outputUnit: order.outputUnit,
-      unitCost,
-      totalMaterialCost,
-      fifoLayerId: layerId
-        ? new mongoose.Types.ObjectId(layerId)
-        : undefined,
-    };
-    order.completedAt = producedAt;
-    order.completedBy = opts.completedBy;
-    order.completingAt = null;
-    await order.save();
+      const totalMaterialCost = Number(
+        consumption.reduce((s, c) => s + c.costTotal, 0).toFixed(3),
+      );
+      const unitCost = Number(
+        (totalMaterialCost / Math.max(order.outputQty, 1e-9)).toFixed(3),
+      );
+
+      const batchNumber = newBatchNumber();
+      const producedAt = new Date();
+
+      const layer = await addProductionFifoLayer(
+        {
+          productId: String(order.outputProductId),
+          supplierId: String(supplier._id),
+          supplierName: `${PRODUCTION_SUPPLIER_NAME} · ${batchNumber}`,
+          productionOrderId: String(order._id),
+          purchaseDate: producedAt,
+          qty: order.outputQty,
+          unitCost,
+          currency: "OMR",
+        },
+        { session },
+      );
+
+      order.status = "completed";
+      order.consumption = consumption;
+      order.batch = {
+        batchNumber,
+        producedAt,
+        outputProductId: order.outputProductId,
+        outputProductName: order.outputProductName,
+        outputSku: order.outputSku,
+        outputQty: order.outputQty,
+        outputUnit: order.outputUnit,
+        unitCost,
+        totalMaterialCost,
+        fifoLayerId: new mongoose.Types.ObjectId(String(layer._id)),
+      };
+      order.completedAt = producedAt;
+      order.completedBy = opts.completedBy;
+      order.completingAt = null;
+      await order.save({ session });
+    });
 
     return order;
   } catch (err) {

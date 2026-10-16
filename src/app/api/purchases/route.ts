@@ -1,7 +1,10 @@
 import { roundMoney } from "@/lib/money";
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
+import mongoose from "mongoose";
+import { addFifoLayer } from "@/lib/inventory";
 import { PurchaseOrder } from "@/lib/models";
+import { purchaseLineUnitError } from "@/lib/purchases/lineUnits";
 import {
   applyFifoFromPurchase,
   derivePurchaseStatus,
@@ -94,6 +97,10 @@ export async function POST(req: Request) {
     if (lines.length) {
       status = derivePurchaseStatus(lines, status as "draft" | "ordered" | "received" | "partial");
     }
+    const unitError = await purchaseLineUnitError(lines);
+    if (unitError) {
+      return NextResponse.json({ error: unitError }, { status: 400 });
+    }
 
     const subtotal =
       lines.length > 0
@@ -104,7 +111,7 @@ export async function POST(req: Request) {
     const vatAmount = roundMoney(subtotal * (vatPercent / 100));
     const total = roundMoney(subtotal + vatAmount);
 
-    const purchase = await PurchaseOrder.create({
+    const purchase = new PurchaseOrder({
       supplierId: body.supplierId,
       supplierName: body.supplierName,
       currency: body.currency || "OMR",
@@ -121,18 +128,25 @@ export async function POST(req: Request) {
       branchName: access?.branchName ?? undefined,
     });
 
-    // Goods receipt → FIFO layers + costFifo refresh (via addFifoLayer)
-    if (status === "received" || status === "partial") {
-      await applyFifoFromPurchase(purchase);
-      purchase.markModified("lines");
-    }
     // PUR-12: first time a PO lands fully received, stamp it and refresh supplier lead time.
     if (status === "received" && !purchase.receivedAt) {
       purchase.receivedAt = new Date();
     }
-    if (purchase.isModified()) {
-      await purchase.save();
-    }
+    // The PO, its FIFO layers and the stock they add commit together. Before,
+    // the PO was created first and qtyFifoApplied saved last: a failure in
+    // between left stock behind with qtyFifoApplied 0, and the next receive
+    // of the same PO added it again.
+    const receiving = status === "received" || status === "partial";
+    await mongoose.connection.transaction(async (session) => {
+      for (const line of purchase.lines) line.qtyFifoApplied = 0;
+      if (receiving) {
+        await applyFifoFromPurchase(purchase, {
+          addFifoLayer: (input) => addFifoLayer(input, { session }),
+        });
+        purchase.markModified("lines");
+      }
+      await purchase.save({ session });
+    });
     if (status === "received") {
       void recalcSupplierAvgLeadDays(String(purchase.supplierId));
     }

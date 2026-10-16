@@ -7,7 +7,7 @@
 import mongoose from "mongoose";
 import { addFifoLayer, deductFifoMany, roundQty } from "@/lib/inventory";
 import { warnIfNegativeStock } from "@/lib/inventory/stockCheck";
-import { InventoryAdjustment, Supplier } from "@/lib/models";
+import { InventoryAdjustment, Product, Supplier } from "@/lib/models";
 import { SaleError } from "@/lib/sales/errors";
 
 export const ADJUSTMENT_SUPPLIER = "Stock Adjustment";
@@ -35,6 +35,17 @@ export async function adjustmentSupplierId(): Promise<string> {
 }
 
 /** Pieces are whole units; ml / g / kg may be fractional. */
+/** Non-FIFO buckets (tester / sample / personal) set by number: a real, non-negative qty that fits the unit. */
+export const NON_FIFO_BUCKETS = ["stockTester", "stockSample", "stockPersonal"] as const;
+export function assertBucketQty(value: unknown, unit: string | undefined, label: string): number {
+  const qty = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  if (!Number.isFinite(qty) || qty < 0) {
+    throw new StockAdjustmentError(`${label} must be a number of 0 or more`);
+  }
+  assertQtyFitsUnit(qty, unit, label);
+  return qty;
+}
+
 export function assertQtyFitsUnit(qty: number, unit: string | undefined, label = "Quantity") {
   if ((unit ?? "pcs") === "pcs" && !Number.isInteger(qty)) {
     throw new StockAdjustmentError(`${label} must be a whole number of pieces`);
@@ -73,9 +84,6 @@ export async function setSellableStock(input: {
   }
   assertQtyFitsUnit(target, product.unit, "Sellable stock");
 
-  const delta = roundQty(target - (Number(product.stockSellable) || 0));
-  if (delta === 0) return { delta: 0, costTotal: 0 };
-
   const productId = String(product._id);
   const branch = {
     ...(input.branchId && mongoose.isValidObjectId(input.branchId)
@@ -84,54 +92,85 @@ export async function setSellableStock(input: {
     ...(input.branchName ? { branchName: input.branchName } : {}),
   };
   const notes = input.notes || "Stock count correction (Inventory screen)";
+  const supplierId = await adjustmentSupplierId();
 
-  if (delta > 0) {
-    await addFifoLayer({
-      productId,
-      supplierId: await adjustmentSupplierId(),
-      supplierName: ADJUSTMENT_SUPPLIER,
-      purchaseDate: new Date(),
-      qty: delta,
-      unitCost: Number(product.costFifo) || 0,
-      currency: "OMR",
-    });
-    const adj = await InventoryAdjustment.create({
-      productId: product._id,
-      productName: product.name,
-      qty: delta,
-      direction: "in",
-      reason: "restock",
-      costTotal: 0,
-      notes,
-      createdBy: input.createdBy,
-      ...branch,
-    });
-    return { delta, adjustmentId: String(adj._id), costTotal: 0 };
-  }
+  // The target is absolute, so the delta must come from the stock as it is
+  // INSIDE the transaction — not from the caller's earlier read. Two
+  // concurrent "set to 10" requests used to both add the same delta (5 → 15),
+  // and a stock change committed without its InventoryAdjustment record when
+  // that insert failed. Now the read, the FIFO write and the record commit
+  // together; a concurrent writer forces a retry that sees the new stock.
+  let out: { delta: number; adjustmentId?: string; costTotal: number } = { delta: 0, costTotal: 0 };
+  await mongoose.connection.transaction(async (session) => {
+    const fresh = await Product.findById(productId)
+      .session(session)
+      .select("stockSellable")
+      .lean<{ stockSellable?: number }>();
+    if (!fresh) throw new StockAdjustmentError(`${product.name} no longer exists`);
+    const current = Number(fresh.stockSellable) || 0;
+    const delta = roundQty(target - current);
+    out = { delta: 0, costTotal: 0 };
+    if (delta === 0) return;
 
-  const qty = -delta;
-  let costTotal = 0;
-  try {
-    const map = await deductFifoMany([{ productId, qty, productName: product.name }]);
-    costTotal = roundQty(map.get(productId)?.costTotal ?? 0);
-  } catch (err) {
-    if (err instanceof SaleError) {
-      throw new StockAdjustmentError(
-        `Cannot reduce ${product.name} by ${qty}: only ${product.stockSellable} on hand in FIFO. ${err.message}`,
+    if (delta > 0) {
+      await addFifoLayer(
+        {
+          productId,
+          supplierId,
+          supplierName: ADJUSTMENT_SUPPLIER,
+          purchaseDate: new Date(),
+          qty: delta,
+          unitCost: Number(product.costFifo) || 0,
+          currency: "OMR",
+        },
+        { session },
       );
+      const [adj] = await InventoryAdjustment.create(
+        [{
+          productId: product._id,
+          productName: product.name,
+          qty: delta,
+          direction: "in",
+          reason: "restock",
+          costTotal: 0,
+          notes,
+          createdBy: input.createdBy,
+          ...branch,
+        }],
+        { session },
+      );
+      out = { delta, adjustmentId: String(adj._id), costTotal: 0 };
+      return;
     }
-    throw err;
-  }
-  const adj = await InventoryAdjustment.create({
-    productId: product._id,
-    productName: product.name,
-    qty,
-    direction: "out",
-    reason: "adjustment",
-    costTotal,
-    notes,
-    createdBy: input.createdBy,
-    ...branch,
+
+    const qty = -delta;
+    let costTotal = 0;
+    try {
+      const map = await deductFifoMany([{ productId, qty, productName: product.name }], { session });
+      costTotal = roundQty(map.get(productId)?.costTotal ?? 0);
+    } catch (err) {
+      if (err instanceof SaleError) {
+        throw new StockAdjustmentError(
+          `Cannot reduce ${product.name} by ${qty}: only ${current} on hand in FIFO. ${err.message}`,
+        );
+      }
+      throw err;
+    }
+    const [adj] = await InventoryAdjustment.create(
+      [{
+        productId: product._id,
+        productName: product.name,
+        qty,
+        direction: "out",
+        reason: "adjustment",
+        costTotal,
+        notes,
+        createdBy: input.createdBy,
+        ...branch,
+      }],
+      { session },
+    );
+    out = { delta, adjustmentId: String(adj._id), costTotal };
   });
-  return { delta, adjustmentId: String(adj._id), costTotal };
+  return out;
 }
